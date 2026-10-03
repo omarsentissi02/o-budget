@@ -1,0 +1,155 @@
+@import "tailwindcss";
+@import "@fontsource-variable/onest";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --canvas: #f3f4f7;
+  --surface: #ffffff;
+  --raised: #eceef3;
+  --line: #e1e4eb;
+  --ink: #12151c;
+  --muted: #5e6575;
+  --faint: #8f96a5;
+  --accent: #2f45d8;
+  --accent-ink: #ffffff;
+  --accent-soft: #e7eafd;
+  --save: #0d8a6c;
+  --save-soft: #dcf2ea;
+  --danger: #c4372e;
+  --danger-soft: #fbe6e4;
+  color-scheme: light;
+}
+
+.dark {
+  --canvas: #000000;
+  --surface: #141518;
+  --raised: #1f2126;
+  --line: #2a2d33;
+  --ink: #f2f3f5;
+  --muted: #a3a9b6;
+  --faint: #737a88;
+  --accent: #8592ff;
+  --accent-ink: #0b0d1f;
+  --accent-soft: #1d2147;
+  --save: #3cc9a2;
+  --save-soft: #0f2c24;
+  --danger: #ff7a6e;
+  --danger-soft: #3a1714;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: "Onest Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-save: var(--save);
+  --color-save-soft: var(--save-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+}
+
+@layer base {
+  html {
+    background: var(--canvas);
+    color: var(--ink);
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply font-sans antialiased;
+    min-height: 100dvh;
+    font-feature-settings: "ss01";
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 10px;
+  }
+  input,
+  textarea,
+  select {
+    font-size: 16px; /* évite le zoom automatique sur iOS */
+  }
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+
+/* --- Animations : uniquement en réponse à une action, sauf l'arrivée du récapitulatif --- */
+@keyframes sheet-up {
+  from { transform: translateY(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes step-in {
+  from { transform: translateX(var(--step-from, 16px)); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+@keyframes grow-x {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes check-draw {
+  to { stroke-dashoffset: 0; }
+}
+@keyframes pop {
+  0% { transform: scale(0.85); opacity: 0; }
+  60% { transform: scale(1.04); opacity: 1; }
+  100% { transform: scale(1); }
+}
+@keyframes ledger-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.anim-sheet { animation: sheet-up 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.anim-fade { animation: fade-in 200ms ease-out both; }
+.anim-step { animation: step-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.anim-grow { transform-origin: left; animation: grow-x 700ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.anim-pop { animation: pop 380ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.anim-ledger > * { animation: ledger-in 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.anim-ledger > *:nth-child(2) { animation-delay: 50ms; }
+.anim-ledger > *:nth-child(3) { animation-delay: 100ms; }
+.anim-ledger > *:nth-child(4) { animation-delay: 150ms; }
+.anim-ledger > *:nth-child(5) { animation-delay: 200ms; }
+.check-path {
+  stroke-dasharray: 40;
+  stroke-dashoffset: 40;
+  animation: check-draw 420ms 120ms ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+/* Masque les flèches des champs numériques et date sur certains navigateurs */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  opacity: 0.6;
+}
