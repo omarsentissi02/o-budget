@@ -5,7 +5,6 @@
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
-    // SPA: unknown paths serve index.html; /api/* always hits the Worker first.
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
   },
@@ -13,8 +12,7 @@
     {
       "binding": "DB",
       "database_name": "o-budget",
-      // Replace with the id printed by `npx wrangler d1 create o-budget`
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "9fed681f-cbff-42ed-a357-78bc5330f468",
       "migrations_dir": "migrations"
     }
   ],
