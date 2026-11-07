@@ -5,13 +5,19 @@ import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from "@ta
 import App from "./App";
 import { ApiRequestError } from "./lib/api";
 import { qk } from "./lib/queries";
+import { clearLocalData } from "./lib/prefs";
 import { MonthProvider } from "./hooks/MonthContext";
 import { ToastProvider } from "./hooks/Toast";
 import "./index.css";
 
 // Session expirée pendant l'utilisation → retour à l'écran de connexion.
 const onError = (error: unknown) => {
-  if (error instanceof ApiRequestError && error.status === 401) queryClient.setQueryData(qk.me, null);
+  if (error instanceof ApiRequestError && error.status === 401) {
+    // Aucune donnée financière ne doit rester en mémoire après la déconnexion.
+    queryClient.removeQueries({ predicate: (q) => q.queryKey[0] !== "me" });
+    clearLocalData();
+    queryClient.setQueryData(qk.me, null);
+  }
 };
 
 const queryClient: QueryClient = new QueryClient({

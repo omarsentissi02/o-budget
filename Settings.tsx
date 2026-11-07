@@ -1,7 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Archive, Download, LogOut, Pencil, Plus, RotateCcw, Sun, Moon, Monitor } from "lucide-react";
-import { CATEGORIES } from "../../shared/categories";
+import { SELECTABLE_CATEGORIES } from "../../shared/categories";
 import { centsToInput, formatEUR, parseAmountToCents } from "../../shared/money";
 import type { MeDTO, PaymentMethodDTO, Theme } from "../../shared/types";
 import { api, download, errorMessage } from "../lib/api";
@@ -10,6 +10,8 @@ import { applyTheme } from "../lib/theme";
 import { clearLocalData } from "../lib/prefs";
 import { useToast } from "../hooks/Toast";
 import { Sheet, ConfirmSheet } from "../components/Sheet";
+import { AiSettings, AlertSettings, BudgetSettings, TaskCategories } from "./SettingsV2";
+import { Select } from "../components/v2";
 import { AmountInput, Button, Field, Panel, SectionTitle, Segmented, TextInput, useFieldId } from "../components/ui";
 
 function Section({ title, children, description }: { title: string; children: ReactNode; description?: string }) {
@@ -217,11 +219,12 @@ function DataManagement() {
   const [busy, setBusy] = useState<string | null>(null);
   const confirmId = useFieldId("confirm");
 
-  const run = async (type: "expenses" | "incomes", format: "csv" | "excel") => {
+  const [scope, setScope] = useState<"finance" | "tasks" | "assistant" | "all">("finance");
+  const run = async (type: "expenses" | "incomes" | "subscriptions" | "tasks", format: "csv" | "excel") => {
     const key = type + format;
     setBusy(key);
     try {
-      const name = `o-budget-${type === "expenses" ? "depenses" : "revenus-epargne"}${format === "excel" ? "-excel" : ""}.csv`;
+      const name = `o-budget-${({ expenses: "depenses", incomes: "revenus-epargne", subscriptions: "abonnements", tasks: "taches" } as const)[type]}${format === "excel" ? "-excel" : ""}.csv`;
       await download(`/export?type=${type}&format=${format}`, name);
     } catch (e) {
       toast(errorMessage(e), "error");
@@ -231,13 +234,13 @@ function DataManagement() {
   };
 
   const wipe = useMutation({
-    mutationFn: () => api<void>("/data", { method: "DELETE", body: { confirm: typed } }),
+    mutationFn: () => api<void>("/data", { method: "DELETE", body: { confirm: typed, scope } }),
     onSuccess: async () => {
       clearLocalData();
       setConfirmOpen(false);
       setTyped("");
       await qc.invalidateQueries();
-      toast("Toutes vos données financières ont été supprimées");
+      toast("Données supprimées");
     },
     onError: (e) => toast(errorMessage(e), "error"),
   });
@@ -252,11 +255,21 @@ function DataManagement() {
         <Button variant="secondary" loading={busy === "expensescsv"} onClick={() => run("expenses", "csv")}><Download size={17} aria-hidden /> Dépenses (CSV)</Button>
         <Button variant="secondary" loading={busy === "incomesexcel"} onClick={() => run("incomes", "excel")}><Download size={17} aria-hidden /> Revenus (Excel)</Button>
         <Button variant="secondary" loading={busy === "incomescsv"} onClick={() => run("incomes", "csv")}><Download size={17} aria-hidden /> Revenus (CSV)</Button>
+        <Button variant="secondary" loading={busy === "subscriptionsexcel"} onClick={() => run("subscriptions", "excel")}><Download size={17} aria-hidden /> Abonnements</Button>
+        <Button variant="secondary" loading={busy === "tasksexcel"} onClick={() => run("tasks", "excel")}><Download size={17} aria-hidden /> Tâches</Button>
       </div>
+      <Field label="Données à supprimer" htmlFor="scope">
+        <Select id="scope" value={scope} onChange={(v) => setScope(v as typeof scope)}>
+          <option value="finance">Données financières (revenus, dépenses, épargne, budgets…)</option>
+          <option value="tasks">Tâches</option>
+          <option value="assistant">Conversation avec l'assistant</option>
+          <option value="all">Tout (finances, tâches, assistant)</option>
+        </Select>
+      </Field>
       <Button variant="danger" className="mt-2" onClick={() => setConfirmOpen(true)}>
-        Supprimer toutes mes données
+        Supprimer ces données
       </Button>
-      <Sheet open={confirmOpen} onClose={() => setConfirmOpen(false)} title="Supprimer toutes vos données ?" description="Revenus, dépenses et épargne de tous les mois seront effacés définitivement. Votre compte et vos paramètres sont conservés.">
+      <Sheet open={confirmOpen} onClose={() => setConfirmOpen(false)} title="Supprimer ces données ?" description="La suppression est définitive. Votre compte, vos paramètres et vos moyens de paiement sont conservés. Exportez d'abord si vous voulez une copie.">
         <form className="flex flex-col gap-4" onSubmit={(e) => { e.preventDefault(); wipe.mutate(); }}>
           <Field label="Tapez SUPPRIMER pour confirmer" htmlFor={confirmId}>
             <TextInput id={confirmId} value={typed} onChange={(e) => setTyped(e.target.value)} autoCapitalize="characters" autoComplete="off" data-autofocus />
@@ -309,14 +322,30 @@ export default function Settings() {
         <PaymentMethods />
       </Section>
 
-      <Section title="Catégories" description="Dix catégories larges, volontairement sans sous-catégories.">
+      <Section title="Budget et épargne" description="Réserve, objectif d'épargne, solde de départ et fuseau horaire.">
+        <BudgetSettings />
+      </Section>
+
+      <Section title="Alertes">
+        <AlertSettings />
+      </Section>
+
+      <Section title="Assistant IA">
+        <AiSettings />
+      </Section>
+
+      <Section title="Catégories de dépenses" description="Dix-huit catégories système. Dans une dépense, ajoutez vos propres sous-catégories et établissements.">
         <ul className="grid grid-cols-2 gap-x-4 gap-y-2">
-          {CATEGORIES.map((c) => (
+          {SELECTABLE_CATEGORIES.map((c) => (
             <li key={c.id} className="flex items-center gap-2 text-[15px]">
               <span aria-hidden>{c.emoji}</span> {c.label}
             </li>
           ))}
         </ul>
+      </Section>
+
+      <Section title="Catégories de tâches">
+        <TaskCategories />
       </Section>
 
       <Section title="Devise">
@@ -343,7 +372,7 @@ export default function Settings() {
         loading={logout.isPending}
         onConfirm={() => logout.mutate()}
       />
-      <p className="pb-2 text-center text-[13px] text-faint">O-Budget 1.0</p>
+      <p className="pb-2 text-center text-[13px] text-faint">O-Budget 2.0</p>
     </div>
   );
 }

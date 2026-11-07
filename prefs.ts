@@ -30,5 +30,10 @@ export function clearLocalData() {
   } catch {
     /* ignoré */
   }
-  if ("caches" in window) caches.delete("ob-api").catch(() => undefined);
+  if ("caches" in window) caches.keys().then((ks) => ks.filter((k) => k === "ob-api").forEach((k) => caches.delete(k))).catch(() => undefined);
+  try {
+    navigator.serviceWorker?.controller?.postMessage("purge");
+  } catch {
+    /* ignoré */
+  }
 }

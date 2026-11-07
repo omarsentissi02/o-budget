@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { getCategory } from "../../shared/categories";
 import { flagEmoji } from "../../shared/countries";
 import { formatEUR } from "../../shared/money";
+import { getPlatform } from "../../shared/taxonomy";
 import { dayShort } from "../../shared/month";
 import { locationLabel, type ExpenseEntryDTO } from "../../shared/types";
 
@@ -20,7 +21,7 @@ export function EntryRow({ entry }: { entry: ExpenseEntryDTO }) {
       </span>
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-[15px] font-medium">
-          {entry.description || cats.map((c) => c.label).join(" · ")}
+          {entry.description || entry.amounts.find((a) => a.merchantLabel)?.merchantLabel || entry.amounts.map((a) => a.subcategoryLabel ?? getCategory(a.categoryId).label).join(" · ")}
         </span>
         <span className="truncate text-[13px] text-faint">
           {dayShort(entry.date)}, {entry.location.type === "france" ? entry.location.city : entry.location.countryName}
@@ -67,8 +68,13 @@ export function EntryDetail({ entry, onDelete }: { entry: ExpenseEntryDTO; onDel
           const c = getCategory(a.categoryId);
           return (
             <li key={a.categoryId} className="flex items-center justify-between text-[15px]">
-              <span>
+              <span className="min-w-0">
                 <span aria-hidden>{c.emoji}</span> {c.label}
+                {(a.subcategoryLabel || a.merchantLabel || a.platformId) && (
+                  <span className="block truncate pl-6 text-[13px] text-faint">
+                    {[a.subcategoryLabel, a.merchantLabel, a.platformId && getPlatform(a.platformId)?.label, a.tripFrom && a.tripTo ? `${a.tripFrom} → ${a.tripTo}` : null].filter(Boolean).join(" · ")}
+                  </span>
+                )}
               </span>
               <span className="num">{formatEUR(a.amountCents)}</span>
             </li>

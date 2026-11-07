@@ -45,8 +45,10 @@ export function CategoryBreakdown({ categories, totalCents }: { categories: Cate
         })}
       </ul>
 
-      {empty.length > 0 && (
-        <ul className={`grid grid-cols-2 gap-x-4 gap-y-2 ${used.length > 0 ? "mt-3 border-t border-line pt-3" : ""}`}>
+      {empty.length > 0 && used.length > 0 && (
+        <details className="mt-3 border-t border-line pt-3">
+          <summary className="cursor-pointer text-sm font-semibold text-accent">{empty.length} catégories sans dépense</summary>
+        <ul className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
           {empty.map((c) => {
             const cat = getCategory(c.categoryId);
             return (
@@ -59,6 +61,7 @@ export function CategoryBreakdown({ categories, totalCents }: { categories: Cate
             );
           })}
         </ul>
+        </details>
       )}
     </Panel>
   );

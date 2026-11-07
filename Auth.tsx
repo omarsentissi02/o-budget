@@ -25,7 +25,10 @@ function useAuthMutation(path: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: Record<string, string>) => api<MeDTO>(path, { method: "POST", body }),
-    onSuccess: (me) => qc.setQueryData(qk.me, me),
+    onSuccess: (me) => {
+      qc.removeQueries({ predicate: (q) => q.queryKey[0] !== "me" }); // jamais de données d'un autre compte
+      qc.setQueryData(qk.me, me);
+    },
   });
 }
 

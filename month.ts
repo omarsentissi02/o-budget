@@ -84,3 +84,42 @@ export const dayFull = (iso: string) => fmtDayFull.format(parse(iso));
 export const dayShort = (iso: string) => fmtDayShort.format(parse(iso));
 /** "2026-10-03" → "03/10/2026" */
 export const dayFR = (iso: string) => iso.split("-").reverse().join("/");
+
+// --- Fuseaux horaires ---------------------------------------------------------------------------------
+// Le Worker tourne en UTC : « aujourd'hui » doit être calculé dans le fuseau de l'utilisateur
+// (Europe/Paris par défaut), sinon les échéances basculent d'un jour entre minuit et 1–2 h du matin.
+
+export const DEFAULT_TIMEZONE = "Europe/Paris";
+
+export function isValidTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function zoneParts(tz: string, now: Date) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
+  return { date: `${get("year")}-${get("month")}-${get("day")}`, time: `${get("hour")}:${get("minute")}` };
+}
+
+/** Date du jour « YYYY-MM-DD » dans le fuseau donné. */
+export function todayInZone(tz: string = DEFAULT_TIMEZONE, now: Date = new Date()): string {
+  return zoneParts(tz, now).date;
+}
+
+/** Heure courante « HH:MM » dans le fuseau donné. */
+export function timeInZone(tz: string = DEFAULT_TIMEZONE, now: Date = new Date()): string {
+  return zoneParts(tz, now).time;
+}

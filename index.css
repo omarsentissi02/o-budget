@@ -18,6 +18,17 @@
   --save-soft: #dcf2ea;
   --danger: #c4372e;
   --danger-soft: #fbe6e4;
+  --warn: #a9640a;
+  --warn-soft: #fcefd6;
+  --info: #2f45d8;
+  --chart-1: #2f45d8;
+  --chart-2: #0d8a6c;
+  --chart-3: #c4772e;
+  --chart-4: #7a4fc7;
+  --chart-5: #1e8fb8;
+  --chart-6: #b8467a;
+  --radius-card: 26px;
+  --shadow-card: 0 1px 2px rgb(18 21 28 / 0.04);
   color-scheme: light;
 }
 
@@ -36,6 +47,16 @@
   --save-soft: #0f2c24;
   --danger: #ff7a6e;
   --danger-soft: #3a1714;
+  --warn: #f0b04f;
+  --warn-soft: #3a2a0d;
+  --info: #8592ff;
+  --chart-1: #8592ff;
+  --chart-2: #3cc9a2;
+  --chart-3: #f0a45a;
+  --chart-4: #b79bf0;
+  --chart-5: #5cc3e6;
+  --chart-6: #ee86b4;
+  --shadow-card: none;
   color-scheme: dark;
 }
 
@@ -55,6 +76,9 @@
   --color-save-soft: var(--save-soft);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-info: var(--info);
 }
 
 @layer base {

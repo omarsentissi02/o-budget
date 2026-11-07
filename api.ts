@@ -7,6 +7,9 @@ export class ApiRequestError extends Error {
   }
 }
 
+/** Erreur de saisie détectée côté application (message affichable tel quel). */
+export class FormError extends Error {}
+
 const GENERIC = "Une erreur est survenue. Réessayez.";
 
 export async function api<T>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
@@ -39,7 +42,7 @@ export async function api<T>(path: string, options: { method?: string; body?: un
 }
 
 export function errorMessage(e: unknown): string {
-  return e instanceof ApiRequestError ? e.message : GENERIC;
+  return e instanceof ApiRequestError || e instanceof FormError ? e.message : GENERIC;
 }
 
 /** Télécharge un export CSV (fonctionne aussi en mode application installée). */
@@ -56,3 +59,8 @@ export async function download(path: string, filename: string) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+export const post = <T>(path: string, body?: unknown) => api<T>(path, { method: "POST", body: body ?? {} });
+export const patch = <T>(path: string, body: unknown) => api<T>(path, { method: "PATCH", body });
+export const put = <T>(path: string, body: unknown) => api<T>(path, { method: "PUT", body });
+export const del = <T = void>(path: string, body?: unknown) => api<T>(path, { method: "DELETE", body });

@@ -1,50 +1,24 @@
 import { lazy, Suspense } from "react";
-import { Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import { useMe } from "./lib/queries";
 import { useApplyTheme } from "./lib/theme";
-import { BottomNav } from "./components/BottomNav";
-import { Button, Skeleton } from "./components/ui";
-import Dashboard from "./pages/Dashboard";
+import { AppShell } from "./components/Shell";
+import { Button } from "./components/ui";
+import Overview from "./pages/Overview";
 import { ForgotPassword, Login, Register } from "./pages/Auth";
 
-const ExpenseWizard = lazy(() => import("./pages/ExpenseWizard"));
-const History = lazy(() => import("./pages/History"));
-const Analysis = lazy(() => import("./pages/Analysis"));
+const ExpenseForm = lazy(() => import("./pages/ExpenseForm"));
+const Finance = lazy(() => import("./pages/Finance"));
+const Analytics = lazy(() => import("./pages/Analytics"));
+const Tasks = lazy(() => import("./pages/Tasks"));
+const Assistant = lazy(() => import("./pages/Assistant"));
 const Settings = lazy(() => import("./pages/Settings"));
-
-function PageFallback() {
-  return (
-    <div className="flex flex-col gap-4 pt-2">
-      <Skeleton className="mx-auto h-8 w-40" />
-      <Skeleton className="h-64 rounded-[26px]" />
-    </div>
-  );
-}
-
-function AppShell() {
-  const { pathname } = useLocation();
-  return (
-    <>
-      <a href="#contenu" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-xl focus:bg-surface focus:p-3">
-        Aller au contenu
-      </a>
-      <main id="contenu" key={pathname} className="anim-fade mx-auto max-w-lg px-4 pt-[calc(env(safe-area-inset-top)+12px)] pb-[calc(env(safe-area-inset-bottom)+112px)] lg:max-w-5xl">
-        <Suspense fallback={<PageFallback />}>
-          <Outlet />
-        </Suspense>
-      </main>
-      <BottomNav />
-    </>
-  );
-}
 
 export default function App() {
   const me = useMe();
   useApplyTheme(me.data?.settings.theme);
 
-  if (me.isPending) {
-    return <div className="min-h-dvh bg-canvas" aria-busy="true" />;
-  }
+  if (me.isPending) return <div className="min-h-dvh bg-canvas" aria-busy="true" />;
 
   if (me.isError) {
     return (
@@ -67,27 +41,18 @@ export default function App() {
 
   return (
     <Routes>
-      <Route
-        path="/depense/nouvelle"
-        element={
-          <Suspense fallback={null}>
-            <ExpenseWizard />
-          </Suspense>
-        }
-      />
-      <Route
-        path="/depense/:id"
-        element={
-          <Suspense fallback={null}>
-            <ExpenseWizard />
-          </Suspense>
-        }
-      />
+      <Route path="/depense/nouvelle" element={<Suspense fallback={null}><ExpenseForm /></Suspense>} />
+      <Route path="/depense/:id" element={<Suspense fallback={null}><ExpenseForm /></Suspense>} />
       <Route element={<AppShell />}>
-        <Route index element={<Dashboard />} />
-        <Route path="/analyse" element={<Analysis />} />
-        <Route path="/historique" element={<History />} />
+        <Route index element={<Overview />} />
+        <Route path="/finances" element={<Finance />} />
+        <Route path="/analyses" element={<Analytics />} />
+        <Route path="/taches" element={<Tasks />} />
+        <Route path="/assistant" element={<Assistant />} />
         <Route path="/parametres" element={<Settings />} />
+        {/* Anciennes adresses de la V1 */}
+        <Route path="/historique" element={<Navigate to="/finances?tab=transactions" replace />} />
+        <Route path="/analyse" element={<Navigate to="/analyses" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
