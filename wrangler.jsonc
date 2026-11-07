@@ -1,9 +1,10 @@
+// Configuration Cloudflare Workers pour O-Budget.
+// Ce fichier était ABSENT de l'archive V1 : le build produisait donc un Worker sans base de données.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "o-budget",
   "main": "worker/index.ts",
-  "compatibility_date": "2025-09-01",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_date": "2026-10-01",
   "assets": {
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
@@ -12,12 +13,19 @@
     {
       "binding": "DB",
       "database_name": "o-budget",
+      // Remplacez par l'identifiant affiché par `npx wrangler d1 create o-budget`.
       "database_id": "9fed681f-cbff-42ed-a357-78bc5330f468",
       "migrations_dir": "migrations"
     }
   ],
   "vars": {
+    // "false" ferme les inscriptions (recommandé une fois votre compte créé).
     "ALLOW_SIGNUP": "true"
+    // Assistant IA (facultatif) — la clé est un SECRET, jamais ici :
+    //   npx wrangler secret put AI_API_KEY
+    // "AI_PROVIDER": "anthropic",   // anthropic | openai | openai-compatible
+    // "AI_MODEL": "<identifiant du modèle de votre fournisseur>",
+    // "AI_BASE_URL": ""             // requis seulement pour openai-compatible
   },
   "observability": { "enabled": true }
 }
