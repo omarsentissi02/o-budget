@@ -58,7 +58,7 @@ await step("3. Octobre 2026 vide : aucun revenu supposé", async () => {
   const r = await omar("GET", `/months/${OCT}`);
   assert.equal(r.status, 200);
   assert.equal(r.data.totals.incomeCents, 0);
-  assert.equal(r.data.categories.length, 10);
+  assert.equal(r.data.categories.length, 18); // V2 : 18 catégories (10 en V1, changement volontaire)
 });
 
 await step("4-6. Revenus d'octobre : Alternance 300, Freelance 500, régularisation 150", async () => {
@@ -157,7 +157,7 @@ await step("14-16. Totaux, reste et épargne d'octobre", async () => {
 });
 
 await step("17. Novembre via montants par défaut + comparaison", async () => {
-  const r = await omar("POST", `/months/2026-11/apply-defaults`);
+  const r = await omar("POST", `/months/2026-11/apply-defaults`, { status: "confirmed" }) /* V2 : « attendu » par défaut ; « confirmed » reproduit la V1 */;
   assert.equal(r.data.totals.incomeCents, 170200);
   const again = await omar("POST", `/months/2026-11/apply-defaults`);
   assert.equal(again.data.incomes.length, 2, "appliquer deux fois ne duplique pas");

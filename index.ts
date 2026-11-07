@@ -8,10 +8,23 @@ import { settings } from "./routes/settings";
 import { months } from "./routes/months";
 import { expenses } from "./routes/expenses";
 import { exportRoutes } from "./routes/export";
+import { taxonomy } from "./routes/taxonomy";
+import { budgets, forecast, goals, recurring } from "./routes/planning";
+import { subscriptions } from "./routes/subscriptions";
+import { tasks } from "./routes/tasks";
+import { analytics } from "./routes/analytics";
+import { overview } from "./routes/overview";
+import { ai } from "./routes/ai";
 
 const app = new Hono<AppEnv>().basePath("/api");
 
-app.use("*", secureHeaders());
+app.use(
+  "*",
+  secureHeaders({
+    // API JSON uniquement : aucune ressource externe n'est jamais chargée depuis ces réponses.
+    contentSecurityPolicy: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] },
+  }),
+);
 app.use("*", sameOrigin);
 app.use("*", async (c, next) => {
   await next();
@@ -27,6 +40,16 @@ app.route("/", settings);
 app.route("/", months);
 app.route("/", expenses);
 app.route("/", exportRoutes);
+app.route("/", taxonomy);
+app.route("/", budgets);
+app.route("/", recurring);
+app.route("/", goals);
+app.route("/", forecast);
+app.route("/", subscriptions);
+app.route("/", tasks);
+app.route("/", analytics);
+app.route("/", overview);
+app.route("/", ai);
 
 app.notFound((c) => c.json({ error: "Ressource introuvable." }, 404));
 

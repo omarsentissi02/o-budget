@@ -1,348 +1,112 @@
-import { getCategory } from "./categories";
-import { getPlatform, getSubcategory, NO_PLATFORM } from "./taxonomy";
-import { addDaysISO, addMonthsISO, fmtISO, lastDayOfMonth, parseISO, startOfWeekISO } from "./recurrence";
-import { percentChange } from "./finance";
+import { Hono } from "hono";
+import { z } from "zod";
+import type { AppEnv } from "../env";
+import { ApiError, validate } from "../lib/http";
+import { isValidISODate } from "../../shared/month";
+import { addDaysISO, diffDays } from "../../shared/recurrence";
+import {
+  breakdown, buildSeries, compareTotals, detectUnusual, filterLines, periodRange, previousRange, DIMENSIONS,
+  type Dimension, type Granularity, type LineFilter, type PeriodTotals,
+} from "../../shared/analytics";
+import { loadLines, loadReceivedIncomes, loadSavingsByMonth } from "../lib/data";
+import { loadSettings, localNow } from "../lib/settings";
 
-/**
- * Analyses financières — fonctions pures sur des « lignes de dépense » (une ligne = un montant dans une
- * catégorie). Chaque ligne n'est comptée qu'UNE fois par dimension : pas de double comptage possible.
- * Les revenus pris en compte sont uniquement ceux REÇUS (cf. shared/income.ts).
- */
+const isoDate = z.string().refine(isValidISODate, "Date invalide.");
+const rangeQuery = z.object({
+  granularity: z.enum(["day", "week", "month", "year"]).default("month"),
+  from: isoDate.optional(),
+  to: isoDate.optional(),
+});
 
-export interface TxLine {
-  id: string;
-  entryId: string;
-  date: string;
-  amountCents: number;
-  categoryId: string;
-  subcategoryId: string | null;
-  subcategoryLabel?: string | null;
-  merchantId: string | null;
-  merchantLabel: string | null;
-  platformId: string | null;
-  paymentLabel: string;
-  place: string | null;
-  description: string | null;
-}
-
-export interface DatedAmount {
-  date: string;
-  amountCents: number;
-}
-
-export type Granularity = "day" | "week" | "month" | "year";
-
-export function bucketKey(date: string, g: Granularity): string {
+/** Période par défaut selon la granularité (dates calendaires de l'utilisateur). */
+function defaultRange(g: Granularity, today: string) {
   switch (g) {
     case "day":
-      return date;
+      return { from: addDaysISO(today, -29), to: today };
     case "week":
-      return startOfWeekISO(date);
-    case "month":
-      return date.slice(0, 7);
-    case "year":
-      return date.slice(0, 4);
-  }
-}
-
-function nextBucket(key: string, g: Granularity): string {
-  switch (g) {
-    case "day":
-      return addDaysISO(key, 1);
-    case "week":
-      return addDaysISO(key, 7);
-    case "month":
-      return addMonthsISO(`${key}-01`, 1).slice(0, 7);
-    case "year":
-      return String(Number(key) + 1);
-  }
-}
-
-/** Toutes les clés de période entre `from` et `to` (dates ISO), y compris les périodes vides. */
-export function bucketKeys(from: string, to: string, g: Granularity): string[] {
-  const keys: string[] = [];
-  const last = bucketKey(to, g);
-  let k = bucketKey(from, g);
-  for (let guard = 0; guard < 5000 && k <= last; guard++) {
-    keys.push(k);
-    k = nextBucket(k, g);
-  }
-  return keys;
-}
-
-export interface SeriesPoint {
-  key: string;
-  incomeCents: number;
-  expenseCents: number;
-  /** null quand l'épargne n'est pas connue à cette granularité (elle est saisie par mois). */
-  savingsCents: number | null;
-  netCents: number;
-}
-
-export function buildSeries(opts: {
-  from: string;
-  to: string;
-  granularity: Granularity;
-  expenses: DatedAmount[];
-  receivedIncomes: DatedAmount[];
-  /** épargne par mois « YYYY-MM » */
-  savingsByMonth: Record<string, number>;
-}): SeriesPoint[] {
-  const { granularity: g } = opts;
-  const keys = bucketKeys(opts.from, opts.to, g);
-  const map = new Map<string, SeriesPoint>(
-    keys.map((k) => [k, { key: k, incomeCents: 0, expenseCents: 0, savingsCents: g === "month" || g === "year" ? 0 : null, netCents: 0 }]),
-  );
-  for (const e of opts.expenses) {
-    const p = map.get(bucketKey(e.date, g));
-    if (p) p.expenseCents += e.amountCents;
-  }
-  for (const i of opts.receivedIncomes) {
-    const p = map.get(bucketKey(i.date, g));
-    if (p) p.incomeCents += i.amountCents;
-  }
-  if (g === "month" || g === "year") {
-    for (const [month, cents] of Object.entries(opts.savingsByMonth)) {
-      const p = map.get(bucketKey(`${month}-01`, g));
-      if (p && p.savingsCents !== null) p.savingsCents += cents;
+      return { from: addDaysISO(periodRange(today, "week").from, -7 * 11), to: periodRange(today, "week").to };
+    case "month": {
+      const first = periodRange(today, "month").from;
+      const [y, m] = first.split("-").map(Number);
+      const start = new Date(Date.UTC(y, m - 1 - 11, 1));
+      return { from: `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, "0")}-01`, to: periodRange(today, "month").to };
     }
-  }
-  for (const p of map.values()) p.netCents = p.incomeCents - p.expenseCents;
-  return keys.map((k) => map.get(k) as SeriesPoint);
-}
-
-// --- Répartitions et exploration ----------------------------------------------------------------
-
-export type Dimension = "category" | "subcategory" | "merchant" | "platform" | "payment" | "city";
-export const DIMENSIONS: Dimension[] = ["category", "subcategory", "merchant", "platform", "payment", "city"];
-
-export interface LineFilter {
-  categoryId?: string;
-  subcategoryId?: string;
-  merchantId?: string;
-  platformId?: string;
-  paymentLabel?: string;
-  place?: string;
-}
-
-const NONE_MERCHANT = "none";
-const NONE_PLACE = "none";
-
-export function dimensionKey(l: TxLine, d: Dimension): string {
-  switch (d) {
-    case "category":
-      return l.categoryId;
-    case "subcategory":
-      return l.subcategoryId ?? `${l.categoryId}:none`;
-    case "merchant":
-      return l.merchantId ?? NONE_MERCHANT;
-    case "platform":
-      return l.platformId ?? NO_PLATFORM;
-    case "payment":
-      return l.paymentLabel;
-    case "city":
-      return l.place ?? NONE_PLACE;
+    case "year":
+      return { from: `${Number(today.slice(0, 4)) - 4}-01-01`, to: `${today.slice(0, 4)}-12-31` };
   }
 }
 
-export function dimensionLabel(l: TxLine, d: Dimension): string {
-  switch (d) {
-    case "category":
-      return getCategory(l.categoryId).label;
-    case "subcategory":
-      return getSubcategory(l.subcategoryId)?.label ?? l.subcategoryLabel ?? "Sans sous-catégorie";
-    case "merchant":
-      return l.merchantLabel ?? "Sans établissement";
-    case "platform":
-      return getPlatform(l.platformId)?.label ?? "Sans plateforme";
-    case "payment":
-      return l.paymentLabel;
-    case "city":
-      return l.place ?? "Lieu non précisé";
-  }
+function parseRange(raw: Record<string, string | undefined>, today: string) {
+  const q = validate(rangeQuery, raw);
+  const d = defaultRange(q.granularity, today);
+  const from = q.from ?? d.from;
+  const to = q.to ?? d.to;
+  if (from > to) throw new ApiError(400, "La date de début doit précéder la date de fin.");
+  if (diffDays(from, to) > 3700) throw new ApiError(400, "Période trop longue (10 ans maximum).");
+  return { granularity: q.granularity, from, to };
 }
 
-export function matchesFilter(l: TxLine, f: LineFilter): boolean {
-  if (f.categoryId !== undefined && l.categoryId !== f.categoryId) return false;
-  if (f.subcategoryId !== undefined && (f.subcategoryId === "none" ? l.subcategoryId !== null : l.subcategoryId !== f.subcategoryId)) return false;
-  if (f.merchantId !== undefined && (l.merchantId ?? NONE_MERCHANT) !== f.merchantId) return false;
-  if (f.platformId !== undefined && (l.platformId ?? NO_PLATFORM) !== f.platformId) return false;
-  if (f.paymentLabel !== undefined && l.paymentLabel !== f.paymentLabel) return false;
-  if (f.place !== undefined && (l.place ?? NONE_PLACE) !== f.place) return false;
-  return true;
-}
-
-export interface BreakdownRow {
-  key: string;
-  label: string;
-  amountCents: number;
-  count: number;
-  /** part du total des lignes filtrées (0–100) */
-  percent: number;
-}
-
-export function breakdown(lines: TxLine[], by: Dimension, filter: LineFilter = {}): { totalCents: number; rows: BreakdownRow[] } {
-  const acc = new Map<string, BreakdownRow>();
-  let total = 0;
-  for (const l of lines) {
-    if (!matchesFilter(l, filter)) continue;
-    total += l.amountCents;
-    const key = dimensionKey(l, by);
-    const row = acc.get(key) ?? { key, label: dimensionLabel(l, by), amountCents: 0, count: 0, percent: 0 };
-    row.amountCents += l.amountCents;
-    row.count += 1;
-    acc.set(key, row);
-  }
-  const rows = [...acc.values()].sort((a, b) => b.amountCents - a.amountCents || a.label.localeCompare(b.label, "fr"));
-  for (const r of rows) r.percent = total > 0 ? (r.amountCents / total) * 100 : 0;
-  return { totalCents: total, rows };
-}
-
-export function filterLines(lines: TxLine[], filter: LineFilter): TxLine[] {
-  return lines.filter((l) => matchesFilter(l, filter)).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
-}
-
-// --- Comparaison de périodes -----------------------------------------------------------------------
-
-export interface PeriodTotals {
-  incomeCents: number;
-  expenseCents: number;
-  netCents: number;
-}
-
-export interface Comparison {
-  current: PeriodTotals;
-  previous: PeriodTotals;
-  incomeChangePct: number | null;
-  expenseChangePct: number | null;
-  netChangePct: number | null;
-}
-
-export function compareTotals(current: PeriodTotals, previous: PeriodTotals): Comparison {
+const filterQuery = z.object({
+  category: z.string().max(64).optional(),
+  sub: z.string().max(64).optional(),
+  merchant: z.string().max(64).optional(),
+  platform: z.string().max(64).optional(),
+  payment: z.string().max(64).optional(),
+  place: z.string().max(80).optional(),
+});
+const toFilter = (raw: Record<string, string | undefined>): LineFilter => {
+  const f = validate(filterQuery, raw);
   return {
-    current,
-    previous,
-    incomeChangePct: percentChange(previous.incomeCents, current.incomeCents),
-    expenseChangePct: percentChange(previous.expenseCents, current.expenseCents),
-    netChangePct: percentChange(previous.netCents, current.netCents),
+    categoryId: f.category, subcategoryId: f.sub, merchantId: f.merchant, platformId: f.platform, paymentLabel: f.payment, place: f.place,
   };
-}
-
-/** Période précédente de même durée, immédiatement avant `from`. */
-export function previousRange(from: string, to: string): { from: string; to: string } {
-  const days = Math.round((Date.UTC(...ymd(to)) - Date.UTC(...ymd(from))) / 86_400_000) + 1;
-  return { from: addDaysISO(from, -days), to: addDaysISO(from, -1) };
-}
-function ymd(iso: string): [number, number, number] {
-  const { y, m, d } = parseISO(iso);
-  return [y, m - 1, d];
-}
-
-/** Bornes d'une période nommée autour d'une date : jour, semaine (lundi), mois ou année. */
-export function periodRange(anchor: string, g: Granularity): { from: string; to: string } {
-  const { y, m } = parseISO(anchor);
-  switch (g) {
-    case "day":
-      return { from: anchor, to: anchor };
-    case "week": {
-      const from = startOfWeekISO(anchor);
-      return { from, to: addDaysISO(from, 6) };
-    }
-    case "month":
-      return { from: fmtISO(y, m, 1), to: fmtISO(y, m, lastDayOfMonth(y, m)) };
-    case "year":
-      return { from: fmtISO(y, 1, 1), to: fmtISO(y, 12, 31) };
-  }
-}
-
-// --- Détection de dépenses inhabituelles -----------------------------------------------------------
-
-export type Unusual =
-  | { kind: "line"; line: TxLine; thresholdCents: number; medianCents: number; reason: string }
-  | { kind: "category"; categoryId: string; currentCents: number; averageCents: number; reason: string };
-
-function quantile(sorted: number[], q: number): number {
-  if (sorted.length === 0) return 0;
-  const pos = (sorted.length - 1) * q;
-  const lo = Math.floor(pos);
-  const hi = Math.ceil(pos);
-  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
-}
-
-export const UNUSUAL_RULES = {
-  /** historique minimal (lignes) dans la catégorie pour juger une dépense */
-  minHistory: 6,
-  historyDays: 180,
-  recentDays: 30,
-  /** montant plancher : on ne signale pas un écart sur de petits montants */
-  minLineCents: 2000,
-  /** seuil = max(Q3 + 1,5×IQR, 2×médiane) */
-  iqrFactor: 1.5,
-  medianFactor: 2,
-  categoryGrowth: 1.5,
-  categoryMinDeltaCents: 4000,
 };
 
-export function detectUnusual(lines: TxLine[], today: string): Unusual[] {
-  const R = UNUSUAL_RULES;
-  const out: Unusual[] = [];
-  const recentFrom = addDaysISO(today, -R.recentDays);
-  const histFrom = addDaysISO(today, -R.historyDays);
-  const byCat = new Map<string, TxLine[]>();
-  for (const l of lines) {
-    if (l.date < histFrom || l.date > today) continue;
-    byCat.set(l.categoryId, [...(byCat.get(l.categoryId) ?? []), l]);
-  }
-  for (const [categoryId, list] of byCat) {
-    for (const l of list) {
-      if (l.date < recentFrom || l.amountCents < R.minLineCents) continue;
-      const history = list.filter((x) => x.id !== l.id && x.date < recentFrom).map((x) => x.amountCents).sort((a, b) => a - b);
-      if (history.length < R.minHistory) continue;
-      const q1 = quantile(history, 0.25);
-      const q3 = quantile(history, 0.75);
-      const median = quantile(history, 0.5);
-      const threshold = Math.max(q3 + R.iqrFactor * (q3 - q1), R.medianFactor * median);
-      if (l.amountCents > threshold) {
-        out.push({
-          kind: "line",
-          line: l,
-          thresholdCents: Math.round(threshold),
-          medianCents: Math.round(median),
-          reason: `Montant nettement supérieur à vos dépenses habituelles dans « ${getCategory(categoryId).label} » (médiane ${(median / 100).toFixed(0)} €).`,
-        });
-      }
-    }
-  }
-  // Dérive d'une catégorie : mois en cours (projeté au prorata) vs moyenne des 3 mois précédents.
-  const month = today.slice(0, 7);
-  const { d } = parseISO(today);
-  const monthDays = lastDayOfMonth(...(month.split("-").map(Number) as [number, number]));
-  const prevMonths = [1, 2, 3].map((k) => addMonthsISO(`${month}-01`, -k).slice(0, 7));
-  const totals = new Map<string, Map<string, number>>();
-  for (const l of lines) {
-    const m = l.date.slice(0, 7);
-    if (m !== month && !prevMonths.includes(m)) continue;
-    const perMonth = totals.get(l.categoryId) ?? new Map<string, number>();
-    perMonth.set(m, (perMonth.get(m) ?? 0) + l.amountCents);
-    totals.set(l.categoryId, perMonth);
-  }
-  for (const [categoryId, perMonth] of totals) {
-    if (categoryId === "logement" || categoryId === "assurance") continue;
-    const past = prevMonths.map((m) => perMonth.get(m) ?? 0).filter((v) => v > 0);
-    if (past.length < 2) continue;
-    const average = past.reduce((s, v) => s + v, 0) / past.length;
-    const current = perMonth.get(month) ?? 0;
-    // On attend au moins 10 jours dans le mois et on compare le cumul réel (pas de projection hasardeuse).
-    if (d < 10 || monthDays === 0) continue;
-    if (current > average * R.categoryGrowth && current - average >= R.categoryMinDeltaCents) {
-      out.push({
-        kind: "category",
-        categoryId,
-        currentCents: current,
-        averageCents: Math.round(average),
-        reason: `« ${getCategory(categoryId).label} » dépasse déjà de ${Math.round(((current - average) / average) * 100)} % la moyenne des mois précédents.`,
-      });
-    }
-  }
-  return out;
-}
+export const analytics = new Hono<AppEnv>()
+  /** Évolutions (revenus reçus, dépenses, épargne), comparaison avec la période précédente, dépenses inhabituelles. */
+  .get("/analytics/overview", async (c) => {
+    const userId = c.get("userId");
+    const db = c.env.DB;
+    const settings = await loadSettings(db, userId);
+    const { today } = localNow(settings);
+    const { granularity, from, to } = parseRange(c.req.query(), today);
+    const prev = previousRange(from, to);
+
+    const [lines, incomes, savings, prevLines, prevIncomes, recent] = await Promise.all([
+      loadLines(db, userId, from, to),
+      loadReceivedIncomes(db, userId, from, to),
+      loadSavingsByMonth(db, userId, from.slice(0, 7), to.slice(0, 7)),
+      loadLines(db, userId, prev.from, prev.to),
+      loadReceivedIncomes(db, userId, prev.from, prev.to),
+      loadLines(db, userId, addDaysISO(today, -180), today),
+    ]);
+    const sum = (xs: { amountCents: number }[]) => xs.reduce((s, x) => s + x.amountCents, 0);
+    const totals = (ls: typeof lines, is: typeof incomes): PeriodTotals => ({ incomeCents: sum(is), expenseCents: sum(ls), netCents: sum(is) - sum(ls) });
+
+    return c.json({
+      range: { granularity, from, to, previous: prev },
+      series: buildSeries({ from, to, granularity, expenses: lines.map((l) => ({ date: l.date, amountCents: l.amountCents })), receivedIncomes: incomes, savingsByMonth: savings }),
+      comparison: compareTotals(totals(lines, incomes), totals(prevLines, prevIncomes)),
+      categories: breakdown(lines, "category"),
+      unusual: detectUnusual(recent, today),
+    });
+  })
+
+  /** Répartition par dimension, avec filtres cumulatifs pour l'exploration (catégorie → sous-catégorie → établissement / plateforme). */
+  .get("/analytics/breakdown", async (c) => {
+    const userId = c.get("userId");
+    const settings = await loadSettings(c.env.DB, userId);
+    const { from, to } = parseRange(c.req.query(), localNow(settings).today);
+    const by = c.req.query("by") ?? "category";
+    if (!DIMENSIONS.includes(by as Dimension)) throw new ApiError(400, "Dimension d'analyse inconnue.");
+    const lines = await loadLines(c.env.DB, userId, from, to);
+    return c.json({ from, to, by, ...breakdown(lines, by as Dimension, toFilter(c.req.query())) });
+  })
+
+  /** Les transactions exactes qui composent un total (même filtres que la répartition). */
+  .get("/analytics/transactions", async (c) => {
+    const userId = c.get("userId");
+    const settings = await loadSettings(c.env.DB, userId);
+    const { from, to } = parseRange(c.req.query(), localNow(settings).today);
+    const lines = filterLines(await loadLines(c.env.DB, userId, from, to), toFilter(c.req.query()));
+    return c.json({ from, to, totalCents: lines.reduce((s, l) => s + l.amountCents, 0), count: lines.length, lines: lines.slice(0, 300) });
+  });

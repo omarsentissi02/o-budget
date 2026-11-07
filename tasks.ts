@@ -1,203 +1,148 @@
-import { addDaysISO, addMonthsISO, parseISO, weekdayIndex } from "./recurrence";
+import { Hono } from "hono";
+import type { AppEnv } from "../env";
+import { ApiError, readJson, uuid, validate, nowISO } from "../lib/http";
+import { taskCategorySchema, taskSchema, taskUpdateSchema } from "../../shared/schemas";
+import { dayLoads, nextDueDate, parseQuickTask, type Recurrence } from "../../shared/tasks";
+import type { TaskCategoryDTO, TaskDTO, TasksOverviewDTO } from "../../shared/types";
+import { loadSettings, localNow } from "../lib/settings";
+import { addDaysISO } from "../../shared/recurrence";
 
-export const PRIORITIES = [
-  { id: "urgent", label: "Urgent", weight: 0 },
-  { id: "important", label: "Important", weight: 1 },
-  { id: "normal", label: "Normal", weight: 2 },
-] as const;
-export type Priority = (typeof PRIORITIES)[number]["id"];
-export const PRIORITY_IDS = PRIORITIES.map((p) => p.id) as [Priority, ...Priority[]];
-export const priorityLabel = (id: string) => PRIORITIES.find((p) => p.id === id)?.label ?? id;
-const weight = (p: Priority) => PRIORITIES.find((x) => x.id === p)?.weight ?? 2;
+interface Row {
+  id: string; title: string; description: string | null; priority: TaskDTO["priority"]; status: TaskDTO["status"];
+  due_date: string | null; due_time: string | null; estimated_minutes: number | null; category_id: string | null;
+  recurrence: Recurrence; series_id: string | null; created_at: string; completed_at: string | null;
+}
+const COLS = "id, title, description, priority, status, due_date, due_time, estimated_minutes, category_id, recurrence, series_id, created_at, completed_at";
+const toDTO = (r: Row): TaskDTO => ({
+  id: r.id, title: r.title, description: r.description, priority: r.priority, status: r.status, dueDate: r.due_date, dueTime: r.due_time,
+  estimatedMinutes: r.estimated_minutes, categoryId: r.category_id, recurrence: r.recurrence, seriesId: r.series_id, createdAt: r.created_at, completedAt: r.completed_at,
+});
 
-export const TASK_STATUSES = [
-  { id: "todo", label: "À faire" },
-  { id: "in_progress", label: "En cours" },
-  { id: "done", label: "Terminée" },
-  { id: "cancelled", label: "Annulée" },
-] as const;
-export type TaskStatus = (typeof TASK_STATUSES)[number]["id"];
-export const TASK_STATUS_IDS = TASK_STATUSES.map((s) => s.id) as [TaskStatus, ...TaskStatus[]];
-
-export const RECURRENCES = [
-  { id: "none", label: "Jamais" },
-  { id: "daily", label: "Chaque jour" },
-  { id: "weekdays", label: "Jours ouvrés" },
-  { id: "weekly", label: "Chaque semaine" },
-  { id: "monthly", label: "Chaque mois" },
-  { id: "yearly", label: "Chaque année" },
-] as const;
-export type Recurrence = (typeof RECURRENCES)[number]["id"];
-export const RECURRENCE_IDS = RECURRENCES.map((r) => r.id) as [Recurrence, ...Recurrence[]];
-
-export interface TaskLike {
-  id: string;
-  title: string;
-  priority: Priority;
-  status: TaskStatus;
-  dueDate: string | null;
-  dueTime: string | null;
-  estimatedMinutes: number | null;
+async function assertTaskCategory(db: D1Database, userId: string, id: string | null | undefined) {
+  if (!id) return null;
+  const ok = await db.prepare("SELECT 1 FROM task_categories WHERE id = ? AND user_id = ?").bind(id, userId).first();
+  if (!ok) throw new ApiError(400, "Catégorie de tâche inconnue.");
+  return id;
 }
 
-export const isOpen = (t: Pick<TaskLike, "status">) => t.status === "todo" || t.status === "in_progress";
-
-/** Date d'échéance suivante d'une tâche récurrente (jamais dans le passé relatif à l'échéance précédente). */
-export function nextDueDate(due: string, rule: Recurrence): string | null {
-  switch (rule) {
-    case "none":
-      return null;
-    case "daily":
-      return addDaysISO(due, 1);
-    case "weekdays": {
-      let next = addDaysISO(due, 1);
-      while (weekdayIndex(next) > 4) next = addDaysISO(next, 1);
-      return next;
-    }
-    case "weekly":
-      return addDaysISO(due, 7);
-    case "monthly":
-      return addMonthsISO(due, 1);
-    case "yearly":
-      return addMonthsISO(due, 12);
-  }
+async function getOne(db: D1Database, userId: string, id: string) {
+  const row = await db.prepare(`SELECT ${COLS} FROM tasks WHERE id = ? AND user_id = ?`).bind(id, userId).first<Row>();
+  if (!row) throw new ApiError(404, "Tâche introuvable.");
+  return row;
 }
 
-/** Tri : priorité, puis échéance (avec heure), puis titre. Les tâches sans date passent en dernier. */
-export function compareTasks(a: TaskLike, b: TaskLike): number {
-  const da = a.dueDate ? `${a.dueDate} ${a.dueTime ?? "23:59"}` : "9999";
-  const db = b.dueDate ? `${b.dueDate} ${b.dueTime ?? "23:59"}` : "9999";
-  return weight(a.priority) - weight(b.priority) || (da < db ? -1 : da > db ? 1 : 0) || a.title.localeCompare(b.title, "fr");
-}
+export const tasks = new Hono<AppEnv>()
+  /**
+   * Liste : tâches ouvertes + terminées récentes (30 jours). `?from=&to=` filtre par échéance (calendrier).
+   * Inclut la charge par jour sur 14 jours pour repérer les journées surchargées.
+   */
+  .get("/tasks", async (c) => {
+    const userId = c.get("userId");
+    const settings = await loadSettings(c.env.DB, userId);
+    const { today } = localNow(settings);
+    const doneSince = addDaysISO(today, -30);
+    const { results } = await c.env.DB.prepare(
+      `SELECT ${COLS} FROM tasks WHERE user_id = ? AND (status IN ('todo', 'in_progress') OR (status = 'done' AND completed_at >= ?)) ORDER BY due_date IS NULL, due_date, due_time, created_at`,
+    ).bind(userId, `${doneSince}T00:00:00Z`).all<Row>();
+    const cats = await c.env.DB.prepare("SELECT id, name, color FROM task_categories WHERE user_id = ? ORDER BY name").bind(userId).all<TaskCategoryDTO>();
+    const list = results.map(toDTO);
+    const body: TasksOverviewDTO = { tasks: list, categories: cats.results, loads: dayLoads(list, today, 14) };
+    return c.json(body);
+  })
 
-export interface TaskBuckets<T extends TaskLike> {
-  overdue: T[];
-  today: T[];
-  upcoming: T[];
-  later: T[];
-  noDate: T[];
-  done: T[];
-}
+  .post("/tasks", async (c) => {
+    const userId = c.get("userId");
+    const input = validate(taskSchema, await readJson(c.req));
+    const categoryId = await assertTaskCategory(c.env.DB, userId, input.categoryId);
+    const recurrence = input.recurrence ?? "none";
+    if (recurrence !== "none" && !input.dueDate) throw new ApiError(400, "Une tâche récurrente a besoin d'une date d'échéance.");
+    const id = uuid();
+    await c.env.DB.prepare(
+      `INSERT INTO tasks (id, user_id, title, description, priority, status, due_date, due_time, estimated_minutes, category_id, recurrence, series_id, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(id, userId, input.title, input.description || null, input.priority ?? "normal", input.status ?? "todo", input.dueDate ?? null, input.dueTime ?? null,
+      input.estimatedMinutes ?? null, categoryId, recurrence, recurrence !== "none" ? id : null, input.status === "done" ? nowISO() : null).run();
+    return c.json(toDTO(await getOne(c.env.DB, userId, id)), 201);
+  })
 
-/** `nowTime` « HH:MM » : une tâche du jour dont l'heure est passée est considérée en retard. */
-export function bucketTasks<T extends TaskLike>(tasks: T[], today: string, nowTime = "00:00", upcomingDays = 7): TaskBuckets<T> {
-  const b: TaskBuckets<T> = { overdue: [], today: [], upcoming: [], later: [], noDate: [], done: [] };
-  const horizon = addDaysISO(today, upcomingDays);
-  for (const t of tasks) {
-    if (t.status === "done") b.done.push(t);
-    else if (t.status === "cancelled") continue;
-    else if (!t.dueDate) b.noDate.push(t);
-    else if (t.dueDate < today || (t.dueDate === today && t.dueTime !== null && t.dueTime < nowTime)) b.overdue.push(t);
-    else if (t.dueDate === today) b.today.push(t);
-    else if (t.dueDate <= horizon) b.upcoming.push(t);
-    else b.later.push(t);
-  }
-  for (const key of ["overdue", "today", "upcoming", "later", "noDate"] as const) b[key].sort(compareTasks);
-  return b;
-}
+  /** Saisie rapide : « Appeler le médecin demain 14h30 !! ~20min » → la tâche est créée directement. */
+  .post("/tasks/quick", async (c) => {
+    const userId = c.get("userId");
+    const body = (await readJson(c.req)) as { text?: unknown; defaultDate?: unknown };
+    if (typeof body.text !== "string" || body.text.trim().length === 0) throw new ApiError(400, "Écrivez le titre de la tâche.");
+    if (body.text.length > 300) throw new ApiError(400, "Texte trop long.");
+    const settings = await loadSettings(c.env.DB, userId);
+    const { today } = localNow(settings);
+    const parsed = parseQuickTask(body.text, today);
+    if (!parsed.title) throw new ApiError(400, "Écrivez le titre de la tâche.");
+    const defaultDate = typeof body.defaultDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.defaultDate) ? body.defaultDate : null;
+    const id = uuid();
+    await c.env.DB.prepare(
+      "INSERT INTO tasks (id, user_id, title, priority, due_date, due_time, estimated_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind(id, userId, parsed.title.slice(0, 160), parsed.priority, parsed.dueDate ?? defaultDate, parsed.dueTime, parsed.estimatedMinutes).run();
+    return c.json(toDTO(await getOne(c.env.DB, userId, id)), 201);
+  })
 
-export const OVERLOAD = { minutes: 420, count: 8 };
-
-export interface DayLoad {
-  date: string;
-  count: number;
-  minutes: number;
-  overloaded: boolean;
-}
-
-/** Charge par jour (tâches ouvertes) : surchargé au-delà de 7 h estimées ou de 8 tâches. */
-export function dayLoads(tasks: TaskLike[], from: string, days: number): DayLoad[] {
-  const out: DayLoad[] = [];
-  for (let i = 0; i < days; i++) {
-    const date = addDaysISO(from, i);
-    const list = tasks.filter((t) => isOpen(t) && t.dueDate === date);
-    const minutes = list.reduce((s, t) => s + (t.estimatedMinutes ?? 0), 0);
-    out.push({ date, count: list.length, minutes, overloaded: minutes > OVERLOAD.minutes || list.length >= OVERLOAD.count });
-  }
-  return out;
-}
-
-// --- Saisie rapide en langage naturel (français) ------------------------------------------------------
-
-export interface ParsedTask {
-  title: string;
-  priority: Priority;
-  dueDate: string | null;
-  dueTime: string | null;
-  estimatedMinutes: number | null;
-}
-
-const WEEKDAYS = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"];
-
-/**
- * « Appeler le médecin demain 14h30 !! ~20min » → titre, échéance, heure, priorité, durée.
- *  - « !! » ou « !urgent » = urgent ; « ! » ou « !important » = important
- *  - « aujourd'hui », « demain », « après-demain », un jour de la semaine (prochaine occurrence), « le 12/11 »
- *  - heure : « 14h », « 14h30 », « 14:30 », « à 9h »
- *  - durée : « ~30min », « ~1h », « ~1h30 »
- * Tout le reste devient le titre. Aucune date n'est inventée : sans indication, dueDate vaut null.
- */
-export function parseQuickTask(input: string, today: string): ParsedTask {
-  let text = ` ${input.trim()} `;
-  let priority: Priority = "normal";
-  let dueDate: string | null = null;
-  let dueTime: string | null = null;
-  let estimatedMinutes: number | null = null;
-  const strip = (re: RegExp) => {
-    const m = text.match(re);
-    if (m) text = text.replace(re, " ");
-    return m;
-  };
-
-  if (strip(/\s(!!|!urgent)(?=\s)/i)) priority = "urgent";
-  else if (strip(/\s(!|!important)(?=\s)/i)) priority = "important";
-
-  const dur = strip(/\s~\s?(?:(\d{1,2})\s?h(?:\s?(\d{1,2}))?|(\d{1,3})\s?(?:min|m))(?=\s)/i);
-  if (dur) {
-    estimatedMinutes = dur[3] ? Number(dur[3]) : Number(dur[1]) * 60 + (dur[2] ? Number(dur[2]) : 0);
-    if (estimatedMinutes <= 0 || estimatedMinutes > 24 * 60) estimatedMinutes = null;
-  }
-
-  const time = strip(/\s(?:à\s)?(\d{1,2})\s?(?:h|:)\s?(\d{2})?(?=\s)/i);
-  if (time) {
-    const h = Number(time[1]);
-    const mi = time[2] ? Number(time[2]) : 0;
-    if (h <= 23 && mi <= 59) dueTime = `${String(h).padStart(2, "0")}:${String(mi).padStart(2, "0")}`;
-  }
-
-  const lower = () => text.toLowerCase();
-  if (/\saprès-demain(?=\s)/.test(lower())) {
-    text = text.replace(/\saprès-demain(?=\s)/i, " ");
-    dueDate = addDaysISO(today, 2);
-  } else if (/\sdemain(?=\s)/.test(lower())) {
-    text = text.replace(/\sdemain(?=\s)/i, " ");
-    dueDate = addDaysISO(today, 1);
-  } else if (/\saujourd['’]hui(?=\s)/.test(lower())) {
-    text = text.replace(/\saujourd['’]hui(?=\s)/i, " ");
-    dueDate = today;
-  } else {
-    const day = WEEKDAYS.find((d) => new RegExp(`\\s${d}(?=\\s)`, "i").test(text));
-    if (day) {
-      text = text.replace(new RegExp(`\\s${day}(?=\\s)`, "i"), " ");
-      const target = WEEKDAYS.indexOf(day);
-      const diff = ((target - weekdayIndex(today) + 7) % 7) || 7;
-      dueDate = addDaysISO(today, diff);
-    } else {
-      const dm = strip(/\s(?:le\s)?(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?(?=\s)/);
-      if (dm) {
-        const day2 = Number(dm[1]);
-        const month = Number(dm[2]);
-        const year = dm[3] ? Number(dm[3]) : parseISO(today).y;
-        const iso = `${year}-${String(month).padStart(2, "0")}-${String(day2).padStart(2, "0")}`;
-        const probe = new Date(Date.UTC(year, month - 1, day2));
-        if (probe.getUTCMonth() === month - 1 && probe.getUTCDate() === day2) {
-          dueDate = !dm[3] && iso < today ? `${year + 1}-${iso.slice(5)}` : iso;
-        }
+  .patch("/tasks/:id", async (c) => {
+    const userId = c.get("userId");
+    const input = validate(taskUpdateSchema, await readJson(c.req));
+    const cur = await getOne(c.env.DB, userId, c.req.param("id"));
+    const pick = <T>(v: T | undefined, d: T) => (v !== undefined ? v : d);
+    const categoryId = input.categoryId !== undefined ? await assertTaskCategory(c.env.DB, userId, input.categoryId) : cur.category_id;
+    const status = pick(input.status, cur.status);
+    const dueDate = pick(input.dueDate, cur.due_date);
+    const dueTime = dueDate ? pick(input.dueTime, cur.due_time) : null;
+    const recurrence = pick(input.recurrence, cur.recurrence);
+    if (recurrence !== "none" && !dueDate) throw new ApiError(400, "Une tâche récurrente a besoin d'une date d'échéance.");
+    const completing = status === "done" && cur.status !== "done";
+    const reopening = status !== "done" && cur.status === "done";
+    const completedAt = completing ? nowISO() : reopening ? null : cur.completed_at;
+    const stmts = [
+      c.env.DB.prepare(
+        `UPDATE tasks SET title = ?, description = ?, priority = ?, status = ?, due_date = ?, due_time = ?, estimated_minutes = ?, category_id = ?,
+           recurrence = ?, series_id = ?, completed_at = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+      ).bind(pick(input.title, cur.title), pick(input.description, cur.description) || null, pick(input.priority, cur.priority), status, dueDate, dueTime,
+        pick(input.estimatedMinutes, cur.estimated_minutes), categoryId, recurrence, recurrence === "none" ? null : (cur.series_id ?? cur.id), completedAt, nowISO(), cur.id, userId),
+    ];
+    // Terminer une tâche récurrente crée l'occurrence suivante (à partir de l'échéance prévue).
+    if (completing && recurrence !== "none" && dueDate) {
+      const next = nextDueDate(dueDate, recurrence);
+      if (next) {
+        stmts.push(
+          c.env.DB.prepare(
+            `INSERT INTO tasks (id, user_id, title, description, priority, status, due_date, due_time, estimated_minutes, category_id, recurrence, series_id)
+             VALUES (?, ?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)`,
+          ).bind(uuid(), userId, pick(input.title, cur.title), pick(input.description, cur.description) || null, pick(input.priority, cur.priority), next, dueTime,
+            pick(input.estimatedMinutes, cur.estimated_minutes), categoryId, recurrence, cur.series_id ?? cur.id),
+        );
       }
     }
-  }
-  if (dueTime && !dueDate) dueDate = today;
+    await c.env.DB.batch(stmts);
+    return c.json(toDTO(await getOne(c.env.DB, userId, cur.id)));
+  })
 
-  const title = text.replace(/\s+/g, " ").trim();
-  return { title, priority, dueDate, dueTime, estimatedMinutes };
-}
+  .delete("/tasks/:id", async (c) => {
+    const res = await c.env.DB.prepare("DELETE FROM tasks WHERE id = ? AND user_id = ?").bind(c.req.param("id"), c.get("userId")).run();
+    if (!res.meta.changes) throw new ApiError(404, "Tâche introuvable.");
+    return c.body(null, 204);
+  })
+
+  .post("/task-categories", async (c) => {
+    const userId = c.get("userId");
+    const input = validate(taskCategorySchema, await readJson(c.req));
+    const id = uuid();
+    try {
+      await c.env.DB.prepare("INSERT INTO task_categories (id, user_id, name, color) VALUES (?, ?, ?, ?)").bind(id, userId, input.name, input.color ?? "#4F5BD5").run();
+    } catch (e) {
+      if (e instanceof Error && /UNIQUE/i.test(e.message)) throw new ApiError(409, "Cette catégorie existe déjà.");
+      throw e;
+    }
+    const dto: TaskCategoryDTO = { id, name: input.name, color: input.color ?? "#4F5BD5" };
+    return c.json(dto, 201);
+  })
+
+  .delete("/task-categories/:id", async (c) => {
+    const res = await c.env.DB.prepare("DELETE FROM task_categories WHERE id = ? AND user_id = ?").bind(c.req.param("id"), c.get("userId")).run();
+    if (!res.meta.changes) throw new ApiError(404, "Catégorie introuvable.");
+    return c.body(null, 204);
+  });

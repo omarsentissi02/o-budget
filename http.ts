@@ -3,7 +3,7 @@ import type { ZodType, ZodTypeDef } from "zod";
 /** Erreur destinée à l'utilisateur : le message est affiché tel quel (en français). */
 export class ApiError extends Error {
   constructor(
-    public status: 400 | 401 | 403 | 404 | 409 | 413 | 429,
+    public status: 400 | 401 | 403 | 404 | 409 | 413 | 429 | 502 | 503,
     message: string,
   ) {
     super(message);

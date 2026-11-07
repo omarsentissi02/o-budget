@@ -26,18 +26,18 @@ describe("formules financières", () => {
     expect(computeTotals([], [1000], 500).savingsRate).toBeNull();
   });
 
-  it("répartition : dix catégories, pourcentages qui totalisent 100", () => {
+  it("répartition : dix-huit catégories (V2, changement volontaire : 10 en V1), pourcentages qui totalisent 100", () => {
     const b = categoryBreakdown([
       { categoryId: "alimentation", amountCents: 1200 },
       { categoryId: "transport", amountCents: 500 },
       { categoryId: "shopping", amountCents: 2000 },
       { categoryId: "alimentation", amountCents: 300 },
     ]);
-    expect(b).toHaveLength(10);
+    expect(b).toHaveLength(18);
     expect(b[0]).toMatchObject({ categoryId: "shopping", amountCents: 2000 });
     expect(b[1]).toMatchObject({ categoryId: "alimentation", amountCents: 1500 });
     expect(b.reduce((s, c) => s + c.percent, 0)).toBeCloseTo(100, 6);
-    expect(b.filter((c) => c.amountCents === 0)).toHaveLength(7);
+    expect(b.filter((c) => c.amountCents === 0)).toHaveLength(15);
   });
 
   it("variation en pourcentage", () => {

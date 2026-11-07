@@ -4,7 +4,8 @@ import { hashPassword, verifyPassword } from "../lib/crypto";
 import { ApiError, readJson, uuid, validate, nowISO } from "../lib/http";
 import { createSession, destroySession, requireAuth } from "../lib/session";
 import { loginSchema, passwordChangeSchema, profileSchema, registerSchema } from "../../shared/schemas";
-import type { MeDTO, Theme } from "../../shared/types";
+import type { MeDTO } from "../../shared/types";
+import { SETTINGS_COLUMNS, toSettingsDTO, type SettingsRow } from "../lib/settings";
 
 const DEFAULT_PAYMENT_METHODS = ["CIH Bank", "LCL", "Revolut"];
 // Hash factice pour que la réponse prenne le même temps quand l'e-mail n'existe pas.
@@ -17,26 +18,16 @@ const MAX_FAILS_PER_IP = 30;
 export async function loadMe(db: D1Database, userId: string): Promise<MeDTO> {
   const [user, settings, methods] = await db.batch([
     db.prepare("SELECT id, email, name FROM users WHERE id = ?").bind(userId),
-    db
-      .prepare("SELECT default_alternance_cents, default_freelance_cents, currency, theme FROM user_settings WHERE user_id = ?")
-      .bind(userId),
+    db.prepare(`SELECT ${SETTINGS_COLUMNS} FROM user_settings WHERE user_id = ?`).bind(userId),
     db
       .prepare("SELECT id, name, archived FROM payment_methods WHERE user_id = ? ORDER BY position, created_at")
       .bind(userId),
   ]);
   const u = user.results[0] as { id: string; email: string; name: string } | undefined;
   if (!u) throw new ApiError(401, "Votre session a expiré. Reconnectez-vous.");
-  const s = settings.results[0] as
-    | { default_alternance_cents: number; default_freelance_cents: number; theme: Theme }
-    | undefined;
   return {
     user: u,
-    settings: {
-      defaultAlternanceCents: s?.default_alternance_cents ?? 120200,
-      defaultFreelanceCents: s?.default_freelance_cents ?? 50000,
-      currency: "EUR",
-      theme: s?.theme ?? "system",
-    },
+    settings: toSettingsDTO(settings.results[0] as SettingsRow | undefined),
     paymentMethods: (methods.results as { id: string; name: string; archived: number }[]).map((m) => ({
       id: m.id,
       name: m.name,

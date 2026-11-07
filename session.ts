@@ -62,12 +62,29 @@ export const requireAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
   await next();
 };
 
-/** Protection CSRF : toute requête qui modifie des données doit venir du même site. */
+/**
+ * Protection CSRF : toute requête qui modifie des données doit provenir du même site.
+ *  - `Origin` présent → doit correspondre à l'hôte (« null » et les valeurs illisibles sont refusés) ;
+ *  - `Origin` absent → on exige `Sec-Fetch-Site: same-origin|none` (navigateurs modernes) ;
+ *  - ni l'un ni l'autre → refusé (V1 laissait passer ce cas).
+ * Les cookies sont en plus `SameSite=Lax`.
+ */
 export const sameOrigin: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!["GET", "HEAD", "OPTIONS"].includes(c.req.method)) {
     const origin = c.req.header("Origin");
     const host = new URL(c.req.url).host;
-    if (origin && new URL(origin).host !== host) throw new ApiError(403, "Requête refusée.");
+    if (origin) {
+      let originHost: string | null = null;
+      try {
+        originHost = new URL(origin).host;
+      } catch {
+        originHost = null;
+      }
+      if (originHost !== host) throw new ApiError(403, "Requête refusée.");
+    } else {
+      const site = c.req.header("Sec-Fetch-Site");
+      if (site !== "same-origin" && site !== "none") throw new ApiError(403, "Requête refusée.");
+    }
   }
   await next();
 };
