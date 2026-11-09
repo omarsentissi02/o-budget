@@ -28,3 +28,4 @@
 
 ### Base de données
 Migrations additives `0003` → `0005` ; V1 `0001`/`0002` inchangées. Retour arrière : `docs/rollback-v2.sql`.
+Déploiement V2
