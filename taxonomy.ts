@@ -1,169 +1,124 @@
-import type { CategoryId } from "./categories";
+import { Hono } from "hono";
+import type { AppEnv } from "../env";
+import { ApiError, readJson, uuid, validate, nowISO } from "../lib/http";
+import { merchantCreateSchema, merchantPrefSchema, subcategoryCreateSchema } from "../../shared/schemas";
+import { SYSTEM_MERCHANTS, isSystemMerchantId, normalizeText, type HalalStatus, type MerchantView } from "../../shared/merchants";
+import type { SubcategoryDTO, TaxonomyDTO } from "../../shared/types";
+import { assertSubcategory } from "../lib/classification";
 
-/**
- * Sous-catégories système (identifiants stables). Les sous-catégories personnalisées de l'utilisateur
- * sont stockées en base (table `subcategories`) et fusionnées côté API.
- *
- * `trip`     : la ligne propose départ / destination / date de voyage.
- * `merchant` : la ligne propose le choix d'un établissement (annuaire + marchands personnels).
- * `platform` : la ligne propose la plateforme / le canal d'achat (Uber Eats, Deliveroo, commande directe…).
- * `recurring`: un abonnement est probable → l'interface suggère de créer un abonnement plutôt qu'une dépense isolée.
- */
-export interface SubcategoryDef {
-  id: string;
-  categoryId: CategoryId;
-  label: string;
-  merchant?: boolean;
-  platform?: boolean;
-  trip?: boolean;
-  recurring?: boolean;
+interface PrefRow {
+  merchant_id: string;
+  use_count: number;
+  last_used_at: string | null;
+  halal_status: HalalStatus;
+  halal_source: string | null;
+  halal_verified_at: string | null;
 }
 
-const s = (categoryId: CategoryId, id: string, label: string, flags: Partial<SubcategoryDef> = {}): SubcategoryDef => ({
-  id,
-  categoryId,
-  label,
-  ...flags,
-});
-
-export const SUBCATEGORIES: readonly SubcategoryDef[] = [
-  // Alimentation
-  s("alimentation", "supermarche", "Supermarché", { merchant: true }),
-  s("alimentation", "courses", "Courses du quotidien", { merchant: true }),
-  s("alimentation", "boulangerie", "Boulangerie", { merchant: true }),
-  s("alimentation", "boucherie", "Boucherie", { merchant: true }),
-  s("alimentation", "fruits_legumes", "Fruits et légumes", { merchant: true }),
-  s("alimentation", "restaurant", "Restaurant", { merchant: true, platform: true }),
-  s("alimentation", "snack", "Snack", { merchant: true, platform: true }),
-  s("alimentation", "fast_food", "Fast-food", { merchant: true, platform: true }),
-  s("alimentation", "livraison", "Livraison de repas", { merchant: true, platform: true }),
-  s("alimentation", "autre_alimentation", "Autres achats alimentaires", { merchant: true }),
-  // Transport
-  s("transport", "train_tgv", "Train / TGV", { trip: true, merchant: true }),
-  s("transport", "ter", "TER", { trip: true }),
-  s("transport", "ouigo", "OUIGO", { trip: true }),
-  s("transport", "avion", "Avion", { trip: true, merchant: true }),
-  s("transport", "bus", "Bus / car", { trip: true, merchant: true }),
-  s("transport", "metro_rer", "Métro / RER"),
-  s("transport", "navigo", "Abonnement Navigo", { recurring: true }),
-  s("transport", "covoiturage", "Covoiturage", { trip: true }),
-  s("transport", "taxi_vtc", "Taxi / VTC", { merchant: true }),
-  s("transport", "uber", "Uber"),
-  s("transport", "bolt", "Bolt"),
-  s("transport", "velo_location", "Location de vélo", { merchant: true }),
-  s("transport", "velib", "Vélib'", { recurring: true }),
-  s("transport", "moto_trottinette", "Location moto / scooter", { merchant: true }),
-  s("transport", "yego", "Yego"),
-  s("transport", "parking", "Parking"),
-  s("transport", "carburant", "Carburant", { merchant: true }),
-  // Shopping
-  s("shopping", "vetements", "Vêtements", { merchant: true }),
-  s("shopping", "chaussures", "Chaussures", { merchant: true }),
-  s("shopping", "equipement_sport", "Équipement sportif", { merchant: true }),
-  s("shopping", "electronique", "Électronique", { merchant: true }),
-  s("shopping", "informatique", "Matériel informatique", { merchant: true }),
-  s("shopping", "accessoires", "Accessoires", { merchant: true }),
-  s("shopping", "maison_meubles", "Maison et meubles", { merchant: true }),
-  s("shopping", "beaute", "Beauté", { merchant: true }),
-  s("shopping", "gadgets", "Gadgets", { merchant: true }),
-  s("shopping", "autres_achats", "Autres achats", { merchant: true }),
-  // Santé
-  s("sante", "medecin_generaliste", "Médecin généraliste"),
-  s("sante", "specialiste", "Spécialiste"),
-  s("sante", "pharmacie", "Pharmacie", { merchant: true }),
-  s("sante", "dentiste", "Dentiste"),
-  s("sante", "opticien", "Opticien", { merchant: true }),
-  s("sante", "analyses", "Analyses médicales"),
-  s("sante", "autre_sante", "Autres soins"),
-  // Sport
-  s("sport", "football", "Football"),
-  s("sport", "padel", "Padel"),
-  s("sport", "salle", "Salle de sport", { recurring: true }),
-  s("sport", "natation", "Natation"),
-  s("sport", "equipement", "Équipement sportif", { merchant: true }),
-  // Loisirs
-  s("loisirs", "divertissement", "Divertissement", { merchant: true }),
-  s("loisirs", "autre_loisir", "Autres loisirs"),
-  // Services & divers
-  s("laverie", "laverie", "Laverie"),
-  s("laverie", "pressing", "Pressing"),
-  s("soins", "coiffeur_barbier", "Coiffeur / barbier"),
-  s("soins", "hygiene", "Hygiène personnelle", { merchant: true }),
-  s("telecom", "mobile", "Forfait mobile", { recurring: true }),
-  s("telecom", "internet", "Internet / box", { recurring: true }),
-  s("telecom", "autre_telecom", "Autres télécoms"),
-  s("etudes", "scolarite", "Frais de scolarité"),
-  s("etudes", "fournitures", "Fournitures et livres"),
-  s("etudes", "formation", "Formation"),
-  s("voyage", "hebergement", "Hébergement", { trip: true, merchant: true }),
-  s("voyage", "activites_voyage", "Activités en voyage"),
-  s("voyage", "autre_voyage", "Autres frais de voyage"),
-  s("logement", "loyer", "Loyer"),
-  s("logement", "charges", "Charges"),
-  s("logement", "electricite", "Électricité", { recurring: true }),
-  s("logement", "eau_gaz", "Eau / gaz"),
-  s("logement", "entretien", "Entretien et réparations"),
-  s("assurance", "assurance_habitation", "Assurance habitation", { recurring: true }),
-  s("assurance", "mutuelle", "Mutuelle santé", { recurring: true }),
-  s("assurance", "assurance_auto", "Assurance auto / moto", { recurring: true }),
-  s("assurance", "autre_assurance", "Autre assurance"),
-  s("administration", "impots", "Impôts et taxes"),
-  s("administration", "amendes", "Amendes"),
-  s("administration", "frais_dossier", "Frais de dossier et timbres"),
-  s("cadeaux", "cadeau", "Cadeau"),
-  s("exceptionnel", "exceptionnel", "Dépense exceptionnelle"),
-  // Abonnements (familles de la fonctionnalité Abonnements)
-  s("abonnements", "abo_pro", "Pro & freelance", { recurring: true }),
-  s("abonnements", "abo_perso", "Personnel & loisirs", { recurring: true }),
-  s("abonnements", "abo_transport", "Transport", { recurring: true }),
-];
-
-const subById = new Map(SUBCATEGORIES.map((x) => [x.id, x]));
-
-export function getSubcategory(id: string | null | undefined): SubcategoryDef | undefined {
-  return id ? subById.get(id) : undefined;
+export async function loadMerchants(db: D1Database, userId: string): Promise<MerchantView[]> {
+  const [custom, prefs] = await db.batch([
+    db.prepare("SELECT id, label, category_id, subcategory_id FROM merchants WHERE user_id = ? AND archived = 0").bind(userId),
+    db.prepare("SELECT merchant_id, use_count, last_used_at, halal_status, halal_source, halal_verified_at FROM merchant_prefs WHERE user_id = ?").bind(userId),
+  ]);
+  const prefBy = new Map((prefs.results as unknown as PrefRow[]).map((p) => [p.merchant_id, p]));
+  const view = (id: string, label: string, system: boolean, categoryId: MerchantView["categoryId"], subs: string[], halalApplicable: boolean): MerchantView => {
+    const p = prefBy.get(id);
+    return {
+      id,
+      label,
+      system,
+      categoryId,
+      subcategoryIds: subs,
+      halalStatus: halalApplicable ? (p?.halal_status ?? "unknown") : null,
+      halalSource: p?.halal_source ?? null,
+      halalVerifiedAt: p?.halal_verified_at ?? null,
+      useCount: p?.use_count ?? 0,
+      lastUsedAt: p?.last_used_at ?? null,
+    };
+  };
+  const sys = SYSTEM_MERCHANTS.map((m) => view(m.id, m.label, true, m.categoryId, m.subcategoryIds, m.halalStatus !== null));
+  const mine = (custom.results as { id: string; label: string; category_id: string | null; subcategory_id: string | null }[]).map((m) =>
+    view(m.id, m.label, false, m.category_id as MerchantView["categoryId"], m.subcategory_id ? [m.subcategory_id] : [], m.category_id === "alimentation"),
+  );
+  return [...sys, ...mine];
 }
 
-export function subcategoriesOf(categoryId: string): SubcategoryDef[] {
-  return SUBCATEGORIES.filter((x) => x.categoryId === categoryId);
-}
+export const taxonomy = new Hono<AppEnv>()
+  .get("/taxonomy", async (c) => {
+    const userId = c.get("userId");
+    const subs = await c.env.DB.prepare("SELECT id, category_id, label FROM subcategories WHERE user_id = ? AND archived = 0 ORDER BY label")
+      .bind(userId)
+      .all<{ id: string; category_id: SubcategoryDTO["categoryId"]; label: string }>();
+    const body: TaxonomyDTO = {
+      customSubcategories: subs.results.map((s) => ({ id: s.id, categoryId: s.category_id, label: s.label, system: false })),
+      merchants: await loadMerchants(c.env.DB, userId),
+    };
+    return c.json(body);
+  })
 
-export function isSystemSubcategory(categoryId: string, subId: string): boolean {
-  return subById.get(subId)?.categoryId === categoryId;
-}
+  .post("/merchants", async (c) => {
+    const userId = c.get("userId");
+    const input = validate(merchantCreateSchema, await readJson(c.req));
+    if (input.categoryId && input.subcategoryId) await assertSubcategory(c.env.DB, userId, input.categoryId, input.subcategoryId);
+    const norm = normalizeText(input.label);
+    if (SYSTEM_MERCHANTS.some((m) => normalizeText(m.label) === norm)) {
+      throw new ApiError(409, "Cet établissement existe déjà dans l'annuaire : sélectionnez-le dans la liste.");
+    }
+    const dup = await c.env.DB.prepare("SELECT 1 FROM merchants WHERE user_id = ? AND label = ? COLLATE NOCASE").bind(userId, input.label).first();
+    if (dup) throw new ApiError(409, "Cet établissement existe déjà.");
+    const id = `c_${uuid()}`;
+    await c.env.DB.prepare("INSERT INTO merchants (id, user_id, label, category_id, subcategory_id) VALUES (?, ?, ?, ?, ?)")
+      .bind(id, userId, input.label, input.categoryId ?? null, input.subcategoryId ?? null)
+      .run();
+    const created = (await loadMerchants(c.env.DB, userId)).find((m) => m.id === id);
+    return c.json(created, 201);
+  })
 
-// --- Plateformes et canaux d'achat -------------------------------------------------------------
+  .delete("/merchants/:id", async (c) => {
+    const res = await c.env.DB.prepare("UPDATE merchants SET archived = 1 WHERE id = ? AND user_id = ?").bind(c.req.param("id"), c.get("userId")).run();
+    if (!res.meta.changes) throw new ApiError(404, "Établissement introuvable ou fourni par l'annuaire.");
+    return c.body(null, 204);
+  })
 
-export interface PlatformDef {
-  id: string;
-  label: string;
-  kind: "delivery" | "direct";
-}
+  /** Statut halal : attribut vérifiable, jamais déduit du nom. « verified » exige une source. */
+  .put("/merchants/:id/halal", async (c) => {
+    const userId = c.get("userId");
+    const id = c.req.param("id");
+    const input = validate(merchantPrefSchema, await readJson(c.req));
+    if (!isSystemMerchantId(id)) {
+      const mine = await c.env.DB.prepare("SELECT 1 FROM merchants WHERE id = ? AND user_id = ?").bind(id, userId).first();
+      if (!mine) throw new ApiError(404, "Établissement introuvable.");
+    }
+    await c.env.DB.prepare(
+      `INSERT INTO merchant_prefs (user_id, merchant_id, halal_status, halal_source, halal_verified_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (user_id, merchant_id) DO UPDATE SET halal_status = excluded.halal_status, halal_source = excluded.halal_source,
+         halal_verified_at = excluded.halal_verified_at`,
+    )
+      .bind(userId, id, input.halalStatus, input.halalStatus === "unknown" ? null : (input.halalSource ?? null), input.halalStatus === "verified" ? nowISO() : null)
+      .run();
+    const updated = (await loadMerchants(c.env.DB, userId)).find((m) => m.id === id);
+    return c.json(updated);
+  })
 
-/**
- * Plateformes : DISTINCTES de la catégorie. Exemple : Alimentation → Fast-food → O'Tacos → Uber Eats.
- * Liste volontairement maintenue à la main (aucune extraction automatique de plateformes commerciales).
- */
-export const PLATFORMS: readonly PlatformDef[] = [
-  { id: "ubereats", label: "Uber Eats", kind: "delivery" },
-  { id: "deliveroo", label: "Deliveroo", kind: "delivery" },
-  { id: "direct", label: "Commande directe au restaurant", kind: "direct" },
-  { id: "other_delivery", label: "Autre plateforme de livraison", kind: "delivery" },
-];
+  .post("/subcategories", async (c) => {
+    const userId = c.get("userId");
+    const input = validate(subcategoryCreateSchema, await readJson(c.req));
+    const id = `u_${uuid()}`;
+    try {
+      await c.env.DB.prepare("INSERT INTO subcategories (id, user_id, category_id, label) VALUES (?, ?, ?, ?)")
+        .bind(id, userId, input.categoryId, input.label)
+        .run();
+    } catch (e) {
+      if (e instanceof Error && /UNIQUE/i.test(e.message)) throw new ApiError(409, "Cette sous-catégorie existe déjà.");
+      throw e;
+    }
+    const dto: SubcategoryDTO = { id, categoryId: input.categoryId, label: input.label, system: false };
+    return c.json(dto, 201);
+  })
 
-export const PLATFORM_IDS = PLATFORMS.map((p) => p.id) as [string, ...string[]];
-const platformById = new Map(PLATFORMS.map((p) => [p.id, p]));
-export const getPlatform = (id: string | null | undefined) => (id ? platformById.get(id) : undefined);
+  .delete("/subcategories/:id", async (c) => {
+    const res = await c.env.DB.prepare("UPDATE subcategories SET archived = 1 WHERE id = ? AND user_id = ?").bind(c.req.param("id"), c.get("userId")).run();
+    if (!res.meta.changes) throw new ApiError(404, "Sous-catégorie introuvable.");
+    return c.body(null, 204);
+  });
 
-export const CHANNELS = [
-  { id: "in_store", label: "Sur place" },
-  { id: "takeaway", label: "À emporter" },
-  { id: "delivery", label: "Livraison" },
-  { id: "online", label: "En ligne" },
-  { id: "app", label: "Application" },
-] as const;
-export type ChannelId = (typeof CHANNELS)[number]["id"];
-export const CHANNEL_IDS = CHANNELS.map((c) => c.id) as [ChannelId, ...ChannelId[]];
-
-/** Clé de regroupement analytique pour une plateforme absente. */
-export const NO_PLATFORM = "none";
