@@ -1,136 +1,124 @@
-import { Hono } from "hono";
-import type { AppEnv } from "../env";
-import { ApiError, readJson, uuid, validate, nowISO } from "../lib/http";
-import { markPaidSchema, subscriptionSchema, subscriptionUpdateSchema } from "../../shared/schemas";
-import {
-  findDuplicateSubscriptions, renewalAfterPayment, subscriptionCosts, SUBSCRIPTION_FAMILIES, upcomingRenewals,
-  type SubscriptionLike,
-} from "../../shared/subscriptions";
-import { monthlyEquivalentCents, yearlyEquivalentCents } from "../../shared/recurrence";
-import type { Frequency } from "../../shared/income";
-import type { SubscriptionDTO, SubscriptionsOverviewDTO } from "../../shared/types";
-import { loadSettings, localNow } from "../lib/settings";
-import { assertSubcategory } from "../lib/classification";
-import { paymentLabelFor, singleLineExpense } from "../lib/ledger";
+import { normalizeText } from "./merchants";
+import type { CategoryId } from "./categories";
+import type { Frequency } from "./income";
+import { addDaysISO, addMonthsISO, diffDays, monthlyEquivalentCents, parseISO, yearlyEquivalentCents } from "./recurrence";
 
-interface Row {
-  id: string; name: string; family: SubscriptionDTO["family"]; category_id: SubscriptionDTO["categoryId"]; subcategory_id: string | null;
-  amount_cents: number; frequency: SubscriptionDTO["frequency"]; start_date: string | null; renewal_date: string | null;
-  payment_method_id: string | null; payment_label: string; status: SubscriptionDTO["status"]; cancelled_on: string | null;
-  cancel_notice_days: number | null; cancel_url: string | null; cancel_notes: string | null; notes: string | null; last_paid_on: string | null;
+export const SUBSCRIPTION_FAMILIES = [
+  { id: "pro", label: "Pro & freelance", categoryId: "abonnements" as CategoryId, subcategoryId: "abo_pro" },
+  { id: "personal", label: "Personnel & télécoms", categoryId: "telecom" as CategoryId, subcategoryId: "mobile" },
+  { id: "transport", label: "Transport", categoryId: "transport" as CategoryId, subcategoryId: "navigo" },
+] as const;
+export type SubscriptionFamily = (typeof SUBSCRIPTION_FAMILIES)[number]["id"];
+export const SUBSCRIPTION_FAMILY_IDS = SUBSCRIPTION_FAMILIES.map((f) => f.id) as [SubscriptionFamily, ...SubscriptionFamily[]];
+export const familyLabel = (id: string) => SUBSCRIPTION_FAMILIES.find((f) => f.id === id)?.label ?? id;
+
+export const SUBSCRIPTION_STATUSES = [
+  { id: "active", label: "Actif" },
+  { id: "trial", label: "Période d'essai" },
+  { id: "paused", label: "En pause" },
+  { id: "cancelled", label: "Résilié" },
+] as const;
+export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUSES)[number]["id"];
+export const SUBSCRIPTION_STATUS_IDS = SUBSCRIPTION_STATUSES.map((s) => s.id) as [SubscriptionStatus, ...SubscriptionStatus[]];
+
+/** Suggestions de saisie rapide (noms uniquement : aucun montant n'est supposé). */
+export const SUBSCRIPTION_PRESETS: { name: string; family: SubscriptionFamily }[] = [
+  { name: "Canva", family: "pro" },
+  { name: "ChatGPT", family: "pro" },
+  { name: "Adobe Creative Cloud", family: "pro" },
+  { name: "Free Mobile", family: "personal" },
+  { name: "Box internet", family: "personal" },
+  { name: "Navigo", family: "transport" },
+  { name: "Vélib'", family: "transport" },
+];
+
+export interface SubscriptionLike {
+  id: string;
+  name: string;
+  family: SubscriptionFamily;
+  amountCents: number;
+  frequency: Frequency;
+  status: SubscriptionStatus;
+  renewalDate: string | null;
 }
-const COLS = "id, name, family, category_id, subcategory_id, amount_cents, frequency, start_date, renewal_date, payment_method_id, payment_label, status, cancelled_on, cancel_notice_days, cancel_url, cancel_notes, notes, last_paid_on";
 
-const toDTO = (r: Row): SubscriptionDTO => ({
-  id: r.id, name: r.name, family: r.family, categoryId: r.category_id, subcategoryId: r.subcategory_id, amountCents: r.amount_cents,
-  frequency: r.frequency, monthlyCents: monthlyEquivalentCents(r.amount_cents, r.frequency), yearlyCents: yearlyEquivalentCents(r.amount_cents, r.frequency),
-  startDate: r.start_date, renewalDate: r.renewal_date, paymentMethodId: r.payment_method_id, paymentLabel: r.payment_label, status: r.status,
-  cancelledOn: r.cancelled_on, cancelNoticeDays: r.cancel_notice_days, cancelUrl: r.cancel_url, cancelNotes: r.cancel_notes, notes: r.notes, lastPaidOn: r.last_paid_on,
-});
+/** Un abonnement coûte de l'argent tant qu'il est actif ou en essai avec un montant renseigné. */
+export const isCosting = (s: Pick<SubscriptionLike, "status">) => s.status === "active" || s.status === "trial";
 
-const like = (s: SubscriptionDTO): SubscriptionLike => ({
-  id: s.id, name: s.name, family: s.family, amountCents: s.amountCents, frequency: s.frequency, status: s.status, renewalDate: s.renewalDate,
-});
-
-async function getOne(db: D1Database, userId: string, id: string) {
-  const row = await db.prepare(`SELECT ${COLS} FROM subscriptions WHERE id = ? AND user_id = ?`).bind(id, userId).first<Row>();
-  if (!row) throw new ApiError(404, "Abonnement introuvable.");
-  return row;
+export interface SubscriptionCosts {
+  monthlyCents: number;
+  yearlyCents: number;
+  byFamily: Record<SubscriptionFamily, { monthlyCents: number; yearlyCents: number; count: number }>;
 }
 
-export const subscriptions = new Hono<AppEnv>()
-  .get("/subscriptions", async (c) => {
-    const userId = c.get("userId");
-    const settings = await loadSettings(c.env.DB, userId);
-    const { today } = localNow(settings);
-    const { results } = await c.env.DB.prepare(`SELECT ${COLS} FROM subscriptions WHERE user_id = ? ORDER BY status = 'cancelled', renewal_date, name`).bind(userId).all<Row>();
-    const items = results.map(toDTO);
-    const likes = items.map(like);
-    const body: SubscriptionsOverviewDTO = {
-      items,
-      costs: subscriptionCosts(likes),
-      upcoming: upcomingRenewals(items, today, 30),
-      duplicates: findDuplicateSubscriptions(likes).map((g) => g.map((s) => s.id)),
-    };
-    return c.json(body);
-  })
+export function subscriptionCosts(subs: SubscriptionLike[]): SubscriptionCosts {
+  const byFamily = {
+    pro: { monthlyCents: 0, yearlyCents: 0, count: 0 },
+    personal: { monthlyCents: 0, yearlyCents: 0, count: 0 },
+    transport: { monthlyCents: 0, yearlyCents: 0, count: 0 },
+  } satisfies SubscriptionCosts["byFamily"];
+  let monthlyCents = 0;
+  let yearlyCents = 0;
+  for (const s of subs) {
+    if (!isCosting(s)) continue;
+    const m = monthlyEquivalentCents(s.amountCents, s.frequency);
+    const y = yearlyEquivalentCents(s.amountCents, s.frequency);
+    monthlyCents += m;
+    yearlyCents += y;
+    byFamily[s.family].monthlyCents += m;
+    byFamily[s.family].yearlyCents += y;
+    byFamily[s.family].count += 1;
+  }
+  return { monthlyCents, yearlyCents, byFamily };
+}
 
-  .post("/subscriptions", async (c) => {
-    const userId = c.get("userId");
-    const input = validate(subscriptionSchema, await readJson(c.req));
-    const fam = SUBSCRIPTION_FAMILIES.find((f) => f.id === input.family)!;
-    const categoryId = input.categoryId ?? fam.categoryId;
-    const sub = input.categoryId ? (input.subcategoryId ?? null) : (input.subcategoryId ?? fam.subcategoryId);
-    await assertSubcategory(c.env.DB, userId, categoryId, sub);
-    const pay = await paymentLabelFor(c.env.DB, userId, input.paymentMethodId);
-    if (!pay) throw new ApiError(400, "Moyen de paiement inconnu.");
-    const status = input.status ?? "active";
-    if (status === "cancelled" && !input.cancelledOn) { /* la date de résiliation est facultative */ }
-    const id = uuid();
-    await c.env.DB.prepare(
-      `INSERT INTO subscriptions (id, user_id, name, family, category_id, subcategory_id, amount_cents, frequency, start_date, renewal_date,
-         payment_method_id, payment_label, status, cancelled_on, cancel_notice_days, cancel_url, cancel_notes, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(id, userId, input.name, input.family, categoryId, sub, input.amountCents, input.frequency, input.startDate ?? null,
-      input.renewalDate ?? input.startDate ?? null, pay.id, pay.label, status, input.cancelledOn ?? null, input.cancelNoticeDays ?? null,
-      input.cancelUrl ?? null, input.cancelNotes || null, input.notes || null).run();
-    return c.json(toDTO(await getOne(c.env.DB, userId, id)), 201);
-  })
+export function upcomingRenewals<T extends SubscriptionLike>(subs: T[], today: string, withinDays: number): (T & { inDays: number })[] {
+  return subs
+    .filter((s) => isCosting(s) && s.renewalDate)
+    .map((s) => ({ ...s, inDays: diffDays(today, s.renewalDate as string) }))
+    .filter((s) => s.inDays <= withinDays)
+    .sort((a, b) => a.inDays - b.inDays);
+}
 
-  .patch("/subscriptions/:id", async (c) => {
-    const userId = c.get("userId");
-    const input = validate(subscriptionUpdateSchema, await readJson(c.req));
-    const cur = await getOne(c.env.DB, userId, c.req.param("id"));
-    const categoryId = input.categoryId ?? cur.category_id;
-    const sub = input.subcategoryId !== undefined ? input.subcategoryId : cur.subcategory_id;
-    await assertSubcategory(c.env.DB, userId, categoryId, sub);
-    let pay = { id: cur.payment_method_id, label: cur.payment_label };
-    if (input.paymentMethodId !== undefined) {
-      const p = await paymentLabelFor(c.env.DB, userId, input.paymentMethodId);
-      if (!p) throw new ApiError(400, "Moyen de paiement inconnu.");
-      pay = p;
+/**
+ * Doublons potentiels : même nom normalisé, ou un nom contenu dans l'autre (≥ 4 caractères),
+ * parmi les abonnements non résiliés. Ce n'est qu'un signalement : l'utilisateur décide.
+ */
+export function findDuplicateSubscriptions<T extends SubscriptionLike>(subs: T[]): T[][] {
+  const live = subs.filter((s) => s.status !== "cancelled").map((s) => ({ s, n: normalizeText(s.name) }));
+  const groups: T[][] = [];
+  const used = new Set<string>();
+  for (let i = 0; i < live.length; i++) {
+    if (used.has(live[i].s.id)) continue;
+    const group = [live[i].s];
+    for (let j = i + 1; j < live.length; j++) {
+      if (used.has(live[j].s.id)) continue;
+      const a = live[i].n;
+      const b = live[j].n;
+      const similar = a === b || (Math.min(a.length, b.length) >= 4 && (a.includes(b) || b.includes(a)));
+      if (similar && a !== "" && b !== "") group.push(live[j].s);
     }
-    const status = input.status ?? cur.status;
-    const pick = <T>(v: T | undefined, d: T) => (v !== undefined ? v : d);
-    await c.env.DB.prepare(
-      `UPDATE subscriptions SET name = ?, family = ?, category_id = ?, subcategory_id = ?, amount_cents = ?, frequency = ?, start_date = ?, renewal_date = ?,
-         payment_method_id = ?, payment_label = ?, status = ?, cancelled_on = ?, cancel_notice_days = ?, cancel_url = ?, cancel_notes = ?, notes = ?, updated_at = ?
-       WHERE id = ? AND user_id = ?`,
-    ).bind(pick(input.name, cur.name), pick(input.family, cur.family), categoryId, sub, pick(input.amountCents, cur.amount_cents),
-      pick(input.frequency, cur.frequency), pick(input.startDate, cur.start_date), pick(input.renewalDate, cur.renewal_date), pay.id, pay.label, status,
-      status === "cancelled" ? (pick(input.cancelledOn, cur.cancelled_on) ?? localNow(await loadSettings(c.env.DB, userId)).today) : null,
-      pick(input.cancelNoticeDays, cur.cancel_notice_days), pick(input.cancelUrl, cur.cancel_url), pick(input.cancelNotes, cur.cancel_notes) || null,
-      pick(input.notes, cur.notes) || null, nowISO(), cur.id, userId).run();
-    return c.json(toDTO(await getOne(c.env.DB, userId, cur.id)));
-  })
+    if (group.length > 1) {
+      group.forEach((g) => used.add(g.id));
+      groups.push(group);
+    }
+  }
+  return groups;
+}
 
-  .delete("/subscriptions/:id", async (c) => {
-    const res = await c.env.DB.prepare("DELETE FROM subscriptions WHERE id = ? AND user_id = ?").bind(c.req.param("id"), c.get("userId")).run();
-    if (!res.meta.changes) throw new ApiError(404, "Abonnement introuvable.");
-    return c.body(null, 204);
-  })
-
-  /** Enregistre le prélèvement (crée une vraie dépense) et avance la date de renouvellement. */
-  .post("/subscriptions/:id/pay", async (c) => {
-    const userId = c.get("userId");
-    const input = validate(markPaidSchema, await readJson(c.req).catch(() => ({})));
-    const cur = await getOne(c.env.DB, userId, c.req.param("id"));
-    if (cur.status === "cancelled" || cur.status === "paused") throw new ApiError(400, "Cet abonnement n'est pas actif.");
-    if (!cur.renewal_date) throw new ApiError(400, "Indiquez d'abord la date de renouvellement.");
-    if (input.dueDate && input.dueDate !== cur.renewal_date) throw new ApiError(409, "Ce renouvellement a déjà été enregistré.");
-    const settings = await loadSettings(c.env.DB, userId);
-    const paidOn = input.paidOn ?? localNow(settings).today;
-    const next = renewalAfterPayment(cur.renewal_date, cur.frequency as Frequency, cur.start_date);
-    const expense = await singleLineExpense(c.env.DB, userId, {
-      date: paidOn, categoryId: cur.category_id, subcategoryId: cur.subcategory_id, amountCents: input.amountCents ?? cur.amount_cents,
-      paymentMethodId: cur.payment_method_id, paymentLabel: cur.payment_label, description: cur.name,
-    });
-    await c.env.DB.batch([
-      ...expense,
-      c.env.DB.prepare(
-        // Un essai gratuit devient actif au premier paiement.
-        "UPDATE subscriptions SET renewal_date = ?, last_paid_on = ?, status = CASE WHEN status = 'trial' THEN 'active' ELSE status END, updated_at = ? WHERE id = ? AND user_id = ? AND renewal_date = ?",
-      ).bind(next, paidOn, nowISO(), cur.id, userId, cur.renewal_date),
-    ]);
-    return c.json(toDTO(await getOne(c.env.DB, userId, cur.id)));
-  });
+/** Prochaine échéance après un paiement ; le jour d'origine (date de début) est conservé. */
+export function renewalAfterPayment(renewalDate: string, frequency: Frequency, startDate: string | null): string | null {
+  const anchorDay = parseISO(startDate ?? renewalDate).d;
+  switch (frequency) {
+    case "once":
+      return null;
+    case "weekly":
+      return addDaysISO(renewalDate, 7);
+    case "monthly":
+      return addMonthsISO(renewalDate, 1, anchorDay);
+    case "quarterly":
+      return addMonthsISO(renewalDate, 3, anchorDay);
+    case "yearly":
+      return addMonthsISO(renewalDate, 12, anchorDay);
+  }
+}
